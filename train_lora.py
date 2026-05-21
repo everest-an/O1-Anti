@@ -23,7 +23,8 @@ def main():
         MODEL_NAME, 
         device_map="auto", 
         quantization_config=quant_config,
-        trust_remote_code=True
+        trust_remote_code=True,
+        attn_implementation="sdpa"  # 避免缺少 flash-attn 库导致的报错，使用 PyTorch 原生高效注意力
     )
 
     # Kaggle 强制要求 max rank 32
