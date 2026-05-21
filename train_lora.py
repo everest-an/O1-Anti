@@ -1,6 +1,6 @@
 import os
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from mt_physics_loss import MTQuantumCoherenceLoss
 
@@ -13,10 +13,16 @@ def main():
     
     # 因为显存限制，本地可能需要量化加载（比赛最终提交的只看 LoRA 权重，可以用 8bit/4bit 练）
     print("Loading Model...")
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True
+    )
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME, 
         device_map="auto", 
-        load_in_8bit=True,   # 降低显存占用
+        quantization_config=quant_config,
         trust_remote_code=True
     )
 
