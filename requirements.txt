@@ -1,4 +1,4 @@
-peft
+peft==0.11.1
 transformers==4.42.4
 torch
 accelerate
