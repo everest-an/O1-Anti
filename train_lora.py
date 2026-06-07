@@ -47,7 +47,7 @@ def main():
     custom_mt_loss = MTQuantumCoherenceLoss(lambda_coherence=0.05)
     
     class MTCustomTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
+        def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
             # 鑾峰彇姝ｅ父鐨勪氦鍙夌喌 loss
             outputs = model(**inputs, output_hidden_states=True)
             base_loss = outputs.loss
