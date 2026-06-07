@@ -69,7 +69,11 @@ def main():
     try:
         raw_dataset = load_dataset("json", data_files="train_math.jsonl", split="train")
         
-        def tokenize_function(examples):`r`n            texts = [tokenizer.apply_chat_template(msg, tokenize=False) for msg in examples["messages"]]`r`n            enc = tokenizer(texts, padding="max_length", truncation=True, max_length=512)`r`n            enc["labels"] = enc["input_ids"].copy()`r`n            return enc
+        def tokenize_function(examples):
+            texts = [tokenizer.apply_chat_template(msg, tokenize=False) for msg in examples["messages"]]
+            enc = tokenizer(texts, padding="max_length", truncation=True, max_length=512)
+            enc["labels"] = enc["input_ids"].copy()
+            return enc
             
         train_dataset = raw_dataset.map(tokenize_function, batched=True, remove_columns=["messages"])
     except Exception as e:
