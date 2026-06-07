@@ -36,9 +36,47 @@ def main():
     )
 
     # ── 3. Prepare for kbit training ─────────────────────────────────────────
-    # MUST be called before get_peft_model when using 4-bit + gradient checkpointing
-    # It enables input-grad hooks and casts norm layers to fp32 for stability
-    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+    # The Omni outer wrapper (NemotronH_Nano_Omni_Reasoning_V3) does NOT support
+    # gradient checkpointing — letting prepare_model_for_kbit_training call the
+    # outer model's gradient_checkpointing_enable() raises ValueError. So disable
+    # it here and best-effort enable GC on the INNER language backbone instead.
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+
+    # Make embedding outputs require grad so LoRA grads flow through frozen base.
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
+    # Best-effort: enable gradient checkpointing on the inner LM (saves T4 VRAM).
+    # Falls back gracefully if no submodule supports it.
+    gc_enabled = False
+    for _name in ("language_model", "model", "llm", "text_model", "transformer"):
+        _inner = getattr(model, _name, None)
+        if _inner is not None and getattr(_inner, "supports_gradient_checkpointing", False):
+            try:
+                _inner.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                print(f"Gradient checkpointing enabled on model.{_name}")
+                gc_enabled = True
+                break
+            except Exception as _e:
+                print(f"GC enable failed on model.{_name}: {_e}")
+    if not gc_enabled:
+        for _mod_name, _mod in model.named_modules():
+            if getattr(_mod, "supports_gradient_checkpointing", False) and hasattr(
+                _mod, "gradient_checkpointing_enable"
+            ):
+                try:
+                    _mod.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    )
+                    print(f"Gradient checkpointing enabled on submodule: {_mod_name}")
+                    gc_enabled = True
+                    break
+                except Exception as _e:
+                    print(f"GC enable failed on {_mod_name}: {_e}")
+    if not gc_enabled:
+        print("WARNING: gradient checkpointing unavailable; relying on short seq len.")
 
     # ── 4. LoRA config (rank ≤ 32 — competition requirement) ─────────────────
     lora_config = LoraConfig(
@@ -97,7 +135,7 @@ def main():
                 texts,
                 padding="max_length",
                 truncation=True,
-                max_length=512,
+                max_length=384,
             )
             # Labels = input_ids but with -100 on padding positions
             # (padding tokens must not contribute to the loss)
@@ -130,8 +168,9 @@ def main():
         save_steps=200,         # Save only at the very end (saves disk I/O)
         save_total_limit=1,
         fp16=True,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},  # PEFT-compatible
+        # GC is handled manually on the inner LM above — the Trainer must NOT call
+        # the outer Omni wrapper's gradient_checkpointing_enable() (raises ValueError).
+        gradient_checkpointing=False,
         dataloader_pin_memory=False,    # Avoids pinned-memory issues with quantised models
         remove_unused_columns=False,    # Keep all columns for custom collator
         report_to="none",               # Disable wandb / tensorboard
