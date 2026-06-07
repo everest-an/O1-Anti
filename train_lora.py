@@ -69,10 +69,7 @@ def main():
     try:
         raw_dataset = load_dataset("json", data_files="train_math.jsonl", split="train")
         
-        def tokenize_function(examples):
-            # 灏?messages 杞崲涓?token
-            texts = [tokenizer.apply_chat_template(msg, tokenize=False) for msg in examples["messages"]]
-            return tokenizer(texts, padding="max_length", truncation=True, max_length=1024)
+        def tokenize_function(examples):`r`n            texts = [tokenizer.apply_chat_template(msg, tokenize=False) for msg in examples["messages"]]`r`n            enc = tokenizer(texts, padding="max_length", truncation=True, max_length=512)`r`n            enc["labels"] = enc["input_ids"].copy()`r`n            return enc
             
         train_dataset = raw_dataset.map(tokenize_function, batched=True, remove_columns=["messages"])
     except Exception as e:
@@ -88,13 +85,20 @@ def main():
         max_steps=200,
         save_steps=50,
         fp16=True,
+        gradient_checkpointing=True,
+        remove_unused_columns=False,
     )
 
+    # Create a simple data collator that just returns the inputs as is (since we're using tokenized data)
+    class SimpleDataCollator:
+        def __call__(self, examples):
+            return {"input_ids": torch.stack([torch.tensor(e['input_ids']) for e in examples])}
+    
     trainer = MTCustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        # data_collator 闇€閰嶇疆
+        data_collator=SimpleDataCollator(),  # Use our custom data collator
     )
 
     print("Starting specialized MT-guided LoRA tuning...")
