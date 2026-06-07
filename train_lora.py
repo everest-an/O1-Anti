@@ -93,16 +93,19 @@ def main():
         remove_unused_columns=False,
     )
 
-    # Create a simple data collator that just returns the inputs as is (since we're using tokenized data)
+    # Pass-through collator: forwards all tokenized columns (input_ids, attention_mask, labels)
     class SimpleDataCollator:
         def __call__(self, examples):
-            return {"input_ids": torch.stack([torch.tensor(e['input_ids']) for e in examples])}
-    
+            batch = {}
+            for key in examples[0].keys():
+                batch[key] = torch.stack([torch.tensor(e[key]) for e in examples])
+            return batch
+
     trainer = MTCustomTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        data_collator=SimpleDataCollator(),  # Use our custom data collator
+        data_collator=SimpleDataCollator(),
     )
 
     print("Starting specialized MT-guided LoRA tuning...")
