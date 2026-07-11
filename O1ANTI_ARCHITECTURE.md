@@ -65,9 +65,40 @@ Matched 2-block LMs, `d_model=128`, 1500 steps, CPU:
 **Go.** NLA reaches full recall matching dense attention while caching 8× less
 per token. Reproduce: `python experiments/p1_nla_swap.py --steps 1500 --seq 32`.
 
-P2 (module routing activation ratio) and P3 (parallel-decode speedup vs
-autoregressive) harnesses are the next milestones on the roadmap in the original
-blueprint.
+### P2 — Module routing vs dense stack (regime classification)
+
+4 latent regimes, `n_modules=8`, `path_len=2`, 800 steps, CPU:
+
+| Variant | Acc | Total params | Active params | Activation |
+|---|---:|---:|---:|---:|
+| Dense stack (runs all 8) | 1.000 | 559,876 | 559,876 | 100% |
+| **Routed graph (runs 2)** | **1.000** | 571,284 | **153,972** | **27%** |
+
+Router usage entropy 1.94 / 2.08 max — modules specialized, no collapse.
+
+**Go.** Routed path matches the dense stack at 27% activation.
+Reproduce: `python experiments/p2_module_routing.py --steps 800 --regimes 4`.
+
+### P3 — Parallel decode vs autoregressive (sequence reconstruction, len 48)
+
+| Path | Tok acc | Forward passes |
+|---|---:|---:|
+| Autoregressive baseline | 1.000 | 48 |
+| **Parallel decoder, faithful skeleton** | **0.999** | **8 (6× fewer)** |
+| Parallel, *generated* skeleton (end-to-end) | 0.07 | 8 |
+
+**Partial — stage 2 proven, stage 1 open.** The parallel mask-predict decoder
+reconstructs a length-48 sequence at 0.999 accuracy in a fixed 8 passes vs 48
+autoregressive steps — the **latency mechanism works**. Two fixes were decisive:
+(a) learned positional keys into the skeleton for cross-attention alignment, and
+(b) CMLM-style uniform mask-ratio training so the decoder sees the fully-masked
+regime it starts inference from. The remaining gap is **stage 1**: flow-matching
+a continuous latent skeleton from noise doesn't yet converge at toy scale
+(generated skeleton ≠ encoder latent), so the end-to-end generated path is still
+near random. This is the blueprint's flagged hardest pillar and the next research
+target (consistency/rectified-flow training, larger scale, or a discrete
+skeleton). Reproduce: `python experiments/p3_parallel_decode.py --steps 2000
+--length 48 --skel_len 48 --decode_iters 8`.
 
 ## Layout
 
@@ -80,7 +111,9 @@ o1anti/
   losses.py        # load balance, state continuity, flow matching
   model.py         # O1AntiModel — LM path + generation path
 experiments/
-  p1_nla_swap.py   # P1 go/no-go harness
+  p1_nla_swap.py        # P1 — NLA vs dense attention
+  p2_module_routing.py  # P2 — routed graph vs dense stack
+  p3_parallel_decode.py # P3 — parallel decode vs autoregressive
 tests/
   test_o1anti.py   # shapes, causality, train/inference consistency
 ```
@@ -90,6 +123,8 @@ tests/
 ```bash
 python -m pytest tests/test_o1anti.py -q      # 9 tests
 python experiments/p1_nla_swap.py --steps 1500 --seq 32
+python experiments/p2_module_routing.py --steps 800 --regimes 4
+python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 --decode_iters 8
 ```
 
 Requires `torch` (tested on 2.5.1). No custom CUDA kernels — the block-sparse

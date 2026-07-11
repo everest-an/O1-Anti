@@ -102,13 +102,17 @@ def test_generation_loss_and_sample():
     assert toks.max() < CFG.vocab_size and toks.min() >= 0
 
 
-def test_skeleton_pool_and_ode_shapes():
+def test_skeleton_encoder_and_ode_shapes():
+    from o1anti.generation import SkeletonEncoder
+
     h = torch.randn(2, 30, CFG.d_model)
-    z1 = SkeletonGenerator.pool_skeleton(h, CFG.skel_len)
+    enc = SkeletonEncoder(CFG).eval()
+    z1 = enc(h)
     assert z1.shape == (2, CFG.skel_len, CFG.d_model)
+    # generator now conditions on the full prompt memory (B, T_prompt, d)
     sg = SkeletonGenerator(CFG).eval()
-    ctx = torch.randn(2, CFG.d_ctx)
-    z = sg.sample(ctx)
+    mem = torch.randn(2, 8, CFG.d_model)
+    z = sg.sample(mem)
     assert z.shape == (2, CFG.skel_len, CFG.d_model)
 
 

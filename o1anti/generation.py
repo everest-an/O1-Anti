@@ -36,48 +36,73 @@ def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)
 
 
-class SkeletonGenerator(nn.Module):
-    """Flow-matching field over the skeleton; few-step Euler at inference."""
+class SkeletonEncoder(nn.Module):
+    """Learned semantic skeleton: a bidirectional encoder over the target
+    sequence, mean-pooled into `skel_len` latent slots. Trained jointly with
+    the decoder through the reconstruction loss, so the compression is
+    invertible — unlike a raw average-pool of embeddings. This is the flow
+    generator's regression target (in latent space, à la latent diffusion)."""
 
     def __init__(self, cfg: O1AntiConfig):
         super().__init__()
         self.cfg = cfg
         d = cfg.d_model
-        self.field = nn.Sequential(
-            nn.Linear(d + d + cfg.d_ctx, 2 * d),
-            nn.GELU(),
-            nn.Linear(2 * d, 2 * d),
-            nn.GELU(),
-            nn.Linear(2 * d, d),
+        self.pos = nn.Parameter(torch.zeros(cfg.max_seq_len, d))
+        nn.init.normal_(self.pos, std=0.02)
+        self.blocks = nn.ModuleList(
+            nn.TransformerEncoderLayer(d, cfg.n_dec_heads, cfg.d_ff, batch_first=True)
+            for _ in range(cfg.n_dec_layers)
         )
+        self.norm = nn.LayerNorm(d)
 
-    def velocity(self, z: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        """z: (B, L_skel, d), t: (B,), ctx: (B, d_ctx) → (B, L_skel, d)."""
-        L = z.shape[1]
-        temb = timestep_embedding(t, self.cfg.d_model).unsqueeze(1).expand(-1, L, -1)
-        c = ctx.unsqueeze(1).expand(-1, L, -1)
-        return self.field(torch.cat([z, temb, c], dim=-1))
+    def forward(self, h_target: torch.Tensor) -> torch.Tensor:
+        """h_target: (B, T, d) → (B, skel_len, d) learned latents."""
+        h = h_target + self.pos[: h_target.shape[1]]
+        for blk in self.blocks:
+            h = blk(h)
+        h = self.norm(h)
+        return F.adaptive_avg_pool1d(h.transpose(1, 2), self.cfg.skel_len).transpose(1, 2)
+
+
+class SkeletonGenerator(nn.Module):
+    """Flow-matching field over the skeleton — a small transformer that
+    self-attends across skeleton slots and cross-attends into the encoded
+    prompt memory, conditioned on the diffusion time. Conditioning on the
+    full prompt (not a single pooled vector) is what lets the generated
+    skeleton actually track the input."""
+
+    def __init__(self, cfg: O1AntiConfig):
+        super().__init__()
+        self.cfg = cfg
+        d = cfg.d_model
+        self.slot_pos = nn.Parameter(torch.zeros(cfg.skel_len, d))
+        nn.init.normal_(self.slot_pos, std=0.02)
+        self.t_proj = nn.Linear(d, d)
+        self.blocks = nn.ModuleList(DecoderBlock(cfg) for _ in range(cfg.n_dec_layers))
+        self.out = nn.Linear(d, d)
+
+    def velocity(self, z: torch.Tensor, t: torch.Tensor, mem: torch.Tensor) -> torch.Tensor:
+        """z: (B, L_skel, d), t: (B,), mem: (B, T_prompt, d) → (B, L_skel, d)."""
+        temb = self.t_proj(timestep_embedding(t, self.cfg.d_model)).unsqueeze(1)
+        h = z + self.slot_pos[: z.shape[1]] + temb
+        for blk in self.blocks:
+            h = blk(h, mem)                       # self-attn + cross-attn into prompt
+        return self.out(h)
 
     @torch.no_grad()
-    def sample(self, ctx: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-        """Integrate dz/dt = v(z, t; ctx) from noise (t=0) to skeleton (t=1)."""
-        B = ctx.shape[0]
+    def sample(self, mem: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+        """Integrate dz/dt = v(z, t; mem) from noise (t=0) to skeleton (t=1)."""
+        B = mem.shape[0]
         z = torch.randn(
             B, self.cfg.skel_len, self.cfg.d_model,
-            device=ctx.device, dtype=ctx.dtype, generator=generator,
+            device=mem.device, dtype=mem.dtype, generator=generator,
         )
         n = self.cfg.ode_steps
         dt = 1.0 / n
         for i in range(n):
-            t = torch.full((B,), i * dt, device=ctx.device, dtype=ctx.dtype)
-            z = z + dt * self.velocity(z, t, ctx)
+            t = torch.full((B,), i * dt, device=mem.device, dtype=mem.dtype)
+            z = z + dt * self.velocity(z, t, mem)
         return z
-
-    @staticmethod
-    def pool_skeleton(h: torch.Tensor, skel_len: int) -> torch.Tensor:
-        """Ground-truth skeleton: adaptive average pool of the target
-        sequence representation. h: (B, T, d) → (B, skel_len, d)."""
-        return F.adaptive_avg_pool1d(h.transpose(1, 2), skel_len).transpose(1, 2)
 
 
 class DecoderBlock(nn.Module):
@@ -113,6 +138,10 @@ class ParallelDecoder(nn.Module):
         self.mask_emb = nn.Parameter(torch.zeros(cfg.d_model))
         self.pos_emb = nn.Parameter(torch.zeros(cfg.max_seq_len, cfg.d_model))
         nn.init.normal_(self.pos_emb, std=0.02)
+        # positional addressing INTO the skeleton, so output position i can
+        # align to its skeleton slot during cross-attention.
+        self.skel_pos = nn.Parameter(torch.zeros(cfg.skel_len, cfg.d_model))
+        nn.init.normal_(self.skel_pos, std=0.02)
         self.blocks = nn.ModuleList(DecoderBlock(cfg) for _ in range(cfg.n_dec_layers))
         self.norm = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -124,6 +153,7 @@ class ParallelDecoder(nn.Module):
         h = self.embed(tokens)
         h = torch.where(masked.unsqueeze(-1), self.mask_emb.expand_as(h), h)
         h = h + self.pos_emb[: h.shape[1]]
+        skel = skel + self.skel_pos[: skel.shape[1]]      # positional keys
         for blk in self.blocks:
             h = blk(h, skel)
         return self.head(self.norm(h))

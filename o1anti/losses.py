@@ -21,17 +21,14 @@ def state_continuity_loss(s: torch.Tensor) -> torch.Tensor:
     return (s[:, 1:] - s[:, :-1]).pow(2).mean()
 
 
-def flow_matching_loss(
-    field, h_target: torch.Tensor, ctx: torch.Tensor, skel_len: int
-) -> torch.Tensor:
+def flow_matching_loss(field, z1: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
     """Linear-interpolant flow matching for the skeleton generator.
 
-    z_t = (1-t) z0 + t z1 with z0 ~ N(0,I), z1 = pooled target skeleton;
-    regression target is the constant velocity z1 - z0.
+    z_t = (1-t) z0 + t z1 with z0 ~ N(0,I); z1 is the target skeleton (a
+    learned latent from SkeletonEncoder, detached). Regression target is the
+    constant velocity z1 - z0.
     """
-    from .generation import SkeletonGenerator
-
-    z1 = SkeletonGenerator.pool_skeleton(h_target, skel_len).detach()
+    z1 = z1.detach()
     z0 = torch.randn_like(z1)
     t = torch.rand(z1.shape[0], device=z1.device, dtype=z1.dtype)
     zt = (1.0 - t)[:, None, None] * z0 + t[:, None, None] * z1

@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import O1AntiConfig
-from .generation import ParallelDecoder, SkeletonGenerator
+from .generation import ParallelDecoder, SkeletonEncoder, SkeletonGenerator
 from .losses import flow_matching_loss, load_balance_loss
 from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary
 
@@ -43,6 +43,7 @@ class O1AntiModel(nn.Module):
         self.norm = nn.LayerNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight
+        self.skel_encoder = SkeletonEncoder(cfg)
         self.skeleton = SkeletonGenerator(cfg)
         self.decoder = ParallelDecoder(cfg, self.embed)
 
@@ -76,17 +77,20 @@ class O1AntiModel(nn.Module):
     def generation_loss(self, prompt_ids: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
         """Stage-1 flow matching + stage-2 masked parallel decoding, both
         conditioned on the prompt context (teacher skeleton for stage 2)."""
-        with torch.no_grad():
-            h_p = self.embed(prompt_ids)
-        ctx = self.context(h_p)
+        mem = self.embed(prompt_ids)                     # prompt memory (B,T,d)
 
         h_t = self.embed(target_ids)
-        fm = flow_matching_loss(self.skeleton, h_t, ctx, self.cfg.skel_len)
+        skel = self.skel_encoder(h_t)                    # learned latent skeleton
+        fm = flow_matching_loss(self.skeleton, skel, mem)
 
-        skel_gt = SkeletonGenerator.pool_skeleton(h_t, self.cfg.skel_len).detach()
-        masked = torch.rand_like(target_ids, dtype=torch.float) < 0.5
+        # decoder reconstructs from the (non-detached) skeleton so gradients
+        # train the encoder to produce an invertible compression.
+        # CMLM masking: per-row mask ratio ~ U(0,1] so the decoder sees the
+        # fully-masked regime it starts inference from, not just a fixed 50%.
+        ratio = torch.rand(target_ids.shape[0], 1, device=target_ids.device)
+        masked = torch.rand_like(target_ids, dtype=torch.float) < ratio
         masked |= ~masked.any(dim=-1, keepdim=True)  # at least one mask per row
-        logits = self.decoder.logits(target_ids, masked, skel_gt)
+        logits = self.decoder.logits(target_ids, masked, skel)
         dec = F.cross_entropy(
             logits[masked].reshape(-1, self.cfg.vocab_size),
             target_ids[masked].reshape(-1),
@@ -102,8 +106,8 @@ class O1AntiModel(nn.Module):
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """Non-autoregressive: ode_steps + decode_iters passes, not `length`."""
-        h, ctx, _, _ = self.encode(prompt_ids)
-        skel = self.skeleton.sample(ctx, generator=generator)
+        mem = self.embed(prompt_ids)
+        skel = self.skeleton.sample(mem, generator=generator)
         return self.decoder.mask_predict(skel, length)
 
     def num_parameters(self, active_only: bool = False) -> int:
