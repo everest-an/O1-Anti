@@ -33,7 +33,13 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from o1anti import O1AntiConfig
-from o1anti.generation import ParallelDecoder, SkeletonEncoder, SkeletonGenerator
+from o1anti.generation import (
+    ParallelDecoder,
+    SkeletonEncoder,
+    SkeletonGenerator,
+    SkeletonPrior,
+    VectorQuantizer,
+)
 from o1anti.module_graph import ContextEncoder
 
 VOCAB = 32
@@ -90,33 +96,55 @@ class ParallelGen(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.embed = nn.Embedding(VOCAB, cfg.d_model)
-        self.context = ContextEncoder(cfg)
         self.skel_encoder = SkeletonEncoder(cfg)
-        self.skeleton = SkeletonGenerator(cfg)
         self.decoder = ParallelDecoder(cfg, self.embed)
+        if cfg.skeleton_mode == "regress":
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.d_model)
+        elif cfg.skeleton_mode == "discrete":
+            self.vq = VectorQuantizer(cfg)
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.codebook_size)
+        else:
+            self.skeleton = SkeletonGenerator(cfg)
 
     def loss(self, prompt, target):
         mem = self.embed(prompt)
         skel = self.skel_encoder(self.embed(target))
-        from o1anti.losses import flow_matching_loss
-        fm = flow_matching_loss(self.skeleton, skel, mem)
+        if self.cfg.skeleton_mode == "regress":
+            stage1 = F.mse_loss(self.prior(mem), skel.detach())
+            std = skel.detach().std(dim=-1, keepdim=True)   # noise-robust decoder
+            skel = skel + self.cfg.skel_noise * std * torch.randn_like(skel)
+        elif self.cfg.skeleton_mode == "discrete":
+            skel, codes, stage1 = self.vq(skel)
+            stage1 = stage1 + F.cross_entropy(
+                self.prior(mem).reshape(-1, self.cfg.codebook_size),
+                codes.detach().reshape(-1),
+            )
+        else:
+            from o1anti.losses import flow_matching_loss
+            stage1 = flow_matching_loss(self.skeleton, skel, mem)
         ratio = torch.rand(target.shape[0], 1, device=target.device)  # CMLM masking
         masked = torch.rand(target.shape, device=target.device) < ratio
         masked |= ~masked.any(dim=-1, keepdim=True)
-        logits = self.decoder.logits(target, masked, skel)
-        dec = F.cross_entropy(logits[masked], target[masked])
-        return fm + dec
+        dec = F.cross_entropy(self.decoder.logits(target, masked, skel)[masked], target[masked])
+        return stage1 + dec
 
     @torch.no_grad()
     def generate(self, prompt, length):
         mem = self.embed(prompt)
-        skel = self.skeleton.sample(mem)
+        if self.cfg.skeleton_mode == "regress":
+            skel = self.prior(mem)
+        elif self.cfg.skeleton_mode == "discrete":
+            skel = self.vq.embed_codes(self.prior(mem).argmax(dim=-1))
+        else:
+            skel = self.skeleton.sample(mem)
         return self.decoder.mask_predict(skel, length)
 
     @torch.no_grad()
     def generate_teacher_skeleton(self, target, length):
         """Diagnostic: decode from the encoded GT skeleton to isolate stage 2."""
         skel_gt = self.skel_encoder(self.embed(target))
+        if getattr(self.cfg, "skeleton_mode", "regress") == "discrete":
+            skel_gt, _, _ = self.vq(skel_gt)
         return self.decoder.mask_predict(skel_gt, length)
 
 
@@ -132,6 +160,7 @@ def main():
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--d_model", type=int, default=96)
     ap.add_argument("--skel_len", type=int, default=0, help="0 = length//3")
+    ap.add_argument("--skeleton_mode", choices=["regress", "discrete", "flow"], default="regress")
     ap.add_argument("--ode_steps", type=int, default=8)
     ap.add_argument("--decode_iters", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
@@ -145,10 +174,10 @@ def main():
         vocab_size=VOCAB, d_model=args.d_model, max_seq_len=args.prompt_len + args.length,
         skel_len=args.skel_len or max(args.length // 3, 4), ode_steps=args.ode_steps,
         decode_iters=args.decode_iters, n_dec_layers=2, n_dec_heads=4,
-        d_ff=2 * args.d_model, d_c=24, d_state=48,
+        d_ff=2 * args.d_model, d_c=24, d_state=48, skeleton_mode=args.skeleton_mode,
     )
     print(f"P3 parallel-decode | device={device} length={args.length} "
-          f"ode_steps={args.ode_steps} decode_iters={args.decode_iters}")
+          f"mode={args.skeleton_mode} decode_iters={args.decode_iters}")
 
     # --- autoregressive baseline ---
     torch.manual_seed(args.seed)
@@ -183,7 +212,8 @@ def main():
         pg_teacher = pg.generate_teacher_skeleton(target, args.length)
 
     ar_passes = args.length
-    pg_passes = args.ode_steps + args.decode_iters
+    stage1_passes = 1 if args.skeleton_mode == "discrete" else args.ode_steps
+    pg_passes = stage1_passes + args.decode_iters
     print(f"\n{'variant':<22}{'tok acc':>9}{'passes':>9}{'wall ms':>10}")
     print(f"{'autoregressive':<22}{acc(ar_pred, target):>9.3f}{ar_passes:>9}{ar_t*1000:>10.1f}")
     print(f"{'parallel (generated)':<22}{acc(pg_pred, target):>9.3f}{pg_passes:>9}{pg_t*1000:>10.1f}")
@@ -192,15 +222,19 @@ def main():
     gen_acc = acc(pg_pred, target)
     teach_acc = acc(pg_teacher, target)
     stage2 = "PROVEN" if teach_acc >= 0.9 * ar_acc else "partial"
-    stage1 = "ok" if gen_acc >= 0.7 * ar_acc else "OPEN — generated skeleton far from encoder latent"
+    s1_name = {"regress": "deterministic prior", "discrete": "VQ code prior",
+               "flow": "flow-matching"}[args.skeleton_mode]
+    stage1 = "PROVEN" if gen_acc >= 0.9 * ar_acc else (
+        "ok" if gen_acc >= 0.7 * ar_acc else "OPEN — generated skeleton far from encoder latent")
     print(f"\npass-count speedup: {ar_passes/pg_passes:.1f}x   "
           f"wall-clock speedup: {ar_t/max(pg_t,1e-6):.1f}x")
     print("\nverdict:")
-    print(f"  stage 2 (parallel decoder, GT skeleton): {teach_acc:.3f} in "
-          f"{args.decode_iters} passes vs AR {ar_acc:.3f} in {ar_passes} passes "
-          f"-> {stage2} ({ar_passes/args.decode_iters:.0f}x fewer passes)")
-    print(f"  stage 1 (flow-matching skeleton generation): generated {gen_acc:.3f} "
-          f"-> {stage1}")
+    print(f"  end-to-end (generated skeleton): {gen_acc:.3f} in {pg_passes} passes "
+          f"vs AR {ar_acc:.3f} in {ar_passes} passes -> {stage1} "
+          f"({ar_passes/pg_passes:.0f}x fewer passes)")
+    print(f"  stage 1 ({s1_name}): generated {gen_acc:.3f} vs GT-skeleton ceiling {teach_acc:.3f}")
+    print(f"  stage 2 (parallel decoder): {teach_acc:.3f} in {args.decode_iters} "
+          f"passes -> {stage2}")
 
 
 if __name__ == "__main__":

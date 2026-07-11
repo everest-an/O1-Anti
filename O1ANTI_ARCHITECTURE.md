@@ -81,24 +81,46 @@ Reproduce: `python experiments/p2_module_routing.py --steps 800 --regimes 4`.
 
 ### P3 — Parallel decode vs autoregressive (sequence reconstruction, len 48)
 
+Full end-to-end (prompt → skeleton → parallel decode), 2500 steps, CPU:
+
 | Path | Tok acc | Forward passes |
 |---|---:|---:|
 | Autoregressive baseline | 1.000 | 48 |
-| **Parallel decoder, faithful skeleton** | **0.999** | **8 (6× fewer)** |
-| Parallel, *generated* skeleton (end-to-end) | 0.07 | 8 |
+| **Parallel, end-to-end (regress skeleton)** | **1.000** | **14 (3.4× fewer)** |
+| Parallel, faithful skeleton (stage-2 ceiling) | 1.000 | 6 |
 
-**Partial — stage 2 proven, stage 1 open.** The parallel mask-predict decoder
-reconstructs a length-48 sequence at 0.999 accuracy in a fixed 8 passes vs 48
-autoregressive steps — the **latency mechanism works**. Two fixes were decisive:
-(a) learned positional keys into the skeleton for cross-attention alignment, and
-(b) CMLM-style uniform mask-ratio training so the decoder sees the fully-masked
-regime it starts inference from. The remaining gap is **stage 1**: flow-matching
-a continuous latent skeleton from noise doesn't yet converge at toy scale
-(generated skeleton ≠ encoder latent), so the end-to-end generated path is still
-near random. This is the blueprint's flagged hardest pillar and the next research
-target (consistency/rectified-flow training, larger scale, or a discrete
-skeleton). Reproduce: `python experiments/p3_parallel_decode.py --steps 2000
---length 48 --skel_len 48 --decode_iters 8`.
+**Go.** The full non-autoregressive pipeline reaches AR-equal accuracy (1.000)
+generating all 48 tokens in **14 passes vs 48** — a 3.4× pass-count and 3.3×
+wall-clock speedup. Stage 1 (`regress`) and stage 2 both proven; the other
+skeleton modes also work end-to-end (`flow` 0.998, `discrete` 0.63 — see below).
+
+Getting here took finding one decisive bug and two design fixes:
+
+- **Position-embedding scale (the bug).** Init was `std=0.02`. When every
+  position is masked (mask-predict's first round), each query is just
+  `mask_emb + pos`, so a tiny `pos` makes all queries identical and
+  cross-attention can't tell positions apart — parallel decode collapsed to
+  ~random *even when handed the exact answer as the skeleton*. Setting
+  `pos_emb_std≈1.0` fixed it: aligned reconstruction jumped 0.06 → 1.000 in a
+  single pass. Locked in by `test_parallel_decoder_reconstructs_aligned_skeleton`.
+- **Shared positional keys.** Output queries and skeleton keys share the same
+  position embedding, giving cross-attention a diagonal alignment prior.
+- **CMLM uniform mask-ratio training** so the decoder trains on the fully-masked
+  regime it starts inference from.
+
+Three interchangeable **stage-1** skeleton generators (`--skeleton_mode`):
+
+| Mode | Mechanism | Stage-1 passes | Generated acc |
+|---|---|---:|---:|
+| `regress` (default) | deterministic prior (prompt→skeleton MSE + noise-robust decode) | 1 | **1.000** |
+| `flow` | flow-matching neural ODE (stochastic) | `ode_steps` | 0.998 |
+| `discrete` | VQ codebook + parallel code prior | 1 | 0.63 |
+
+`regress` is best when the target is (near-)deterministic in the prompt; `flow`
+is the stochastic/diverse-sampling path; `discrete` needs residual/product VQ to
+raise codebook capacity (current single-code VQ caps fidelity). Reproduce:
+`python experiments/p3_parallel_decode.py --steps 2500 --length 48 --skel_len 48
+--decode_iters 6 --skeleton_mode regress`.
 
 ## Layout
 

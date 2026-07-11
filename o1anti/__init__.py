@@ -17,7 +17,13 @@ Three pillars, each attacking one Transformer cost root:
 from .config import O1AntiConfig
 from .nla import NeuralLiquidAdjacency, LiquidStateScan
 from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary, NeuralModule
-from .generation import SkeletonGenerator, ParallelDecoder
+from .generation import (
+    SkeletonEncoder,
+    SkeletonGenerator,
+    SkeletonPrior,
+    VectorQuantizer,
+    ParallelDecoder,
+)
 from .model import O1AntiModel
 from .losses import load_balance_loss, state_continuity_loss, flow_matching_loss
 
@@ -29,7 +35,10 @@ __all__ = [
     "GlobalRouter",
     "ModuleLibrary",
     "NeuralModule",
+    "SkeletonEncoder",
     "SkeletonGenerator",
+    "SkeletonPrior",
+    "VectorQuantizer",
     "ParallelDecoder",
     "O1AntiModel",
     "load_balance_loss",

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -121,3 +123,33 @@ def test_active_params_fraction():
     total = model.num_parameters()
     active = model.num_parameters(active_only=True)
     assert active < total
+
+
+def test_parallel_decoder_reconstructs_aligned_skeleton():
+    """The P3 alignment guarantee: given a per-position 'answer' skeleton, the
+    parallel decoder must reconstruct it in one pass. This is what breaks if the
+    position-embedding scale regresses back to ~0.02 (all masked queries become
+    identical and cross-attention can't tell positions apart)."""
+    from o1anti.generation import ParallelDecoder
+
+    torch.manual_seed(0)
+    cfg = O1AntiConfig(vocab_size=24, d_model=48, max_seq_len=40, skel_len=24,
+                       decode_iters=4, n_dec_layers=2, n_dec_heads=4, d_ff=96)
+    embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
+    skel_embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
+    dec = ParallelDecoder(cfg, embed)
+    opt = torch.optim.AdamW(
+        list(embed.parameters()) + list(skel_embed.parameters()) + list(dec.parameters()), lr=3e-3
+    )
+    L = 24
+    for _ in range(400):
+        t = torch.randint(0, cfg.vocab_size, (32, L))
+        skel = skel_embed(t)                       # skeleton = per-position answer
+        r = torch.rand(32, 1)
+        m = torch.rand(32, L) < r
+        m |= ~m.any(dim=-1, keepdim=True)
+        loss = F.cross_entropy(dec.logits(t, m, skel)[m], t[m])
+        opt.zero_grad(); loss.backward(); opt.step()
+    t = torch.randint(0, cfg.vocab_size, (64, L))
+    acc = (dec.mask_predict(skel_embed(t), L) == t).float().mean().item()
+    assert acc > 0.9, f"aligned-skeleton reconstruction collapsed to {acc:.3f}"

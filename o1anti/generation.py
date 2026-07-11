@@ -1,21 +1,26 @@
 """
 generation.py — Liquid state-transition generation (pillar 3: latency).
 
-Two-stage, non-autoregressive:
+Two-stage, non-autoregressive. A length-n sequence costs (stage-1 + decode_iters)
+forward passes instead of n autoregressive steps.
 
-  Stage 1  SkeletonGenerator — a flow-matching vector field v(z, t; ctx)
-           integrated with a handful of Euler steps maps noise straight to a
-           continuous "semantic skeleton" (skel_len << seq_len vectors).
-           Training target: linear-interpolant flow matching against
-           skeletons pooled from the ground-truth sequence.
+  Stage 1  produce a "semantic skeleton" (skel_len << n latent vectors) from the
+           prompt. Three interchangeable generators:
+             SkeletonPrior (regress)  — deterministic prompt→skeleton, 1 pass.
+             SkeletonGenerator (flow) — flow-matching neural ODE, ode_steps.
+             VectorQuantizer + SkeletonPrior (discrete) — VQ codes, 1 pass.
+           SkeletonEncoder produces the training-time target skeleton from the
+           ground-truth sequence (the stage-2 teacher).
 
-  Stage 2  ParallelDecoder — bidirectional blocks with cross-attention into
-           the skeleton emit ALL tokens at once, refined with a fixed number
-           of mask-predict rounds (re-mask lowest-confidence positions and
-           re-decode).
+  Stage 2  ParallelDecoder — bidirectional blocks cross-attend into the skeleton
+           and emit ALL tokens at once, refined with a fixed number of
+           mask-predict rounds (re-mask lowest-confidence positions, re-decode).
 
-Cost model for a length-n generation: ode_steps + decode_iters forward
-passes total, instead of n autoregressive steps.
+CRITICAL: position embeddings here use O(1) init (cfg.pos_emb_std ≈ 1), NOT the
+usual 0.02. In mask-predict's first round every position is masked, so the query
+is only mask_emb + pos; a tiny pos makes all queries identical and cross-attention
+cannot address positions, collapsing decode to random. Output queries and
+skeleton keys also SHARE the position embedding for a diagonal alignment prior.
 """
 
 import math
@@ -48,7 +53,7 @@ class SkeletonEncoder(nn.Module):
         self.cfg = cfg
         d = cfg.d_model
         self.pos = nn.Parameter(torch.zeros(cfg.max_seq_len, d))
-        nn.init.normal_(self.pos, std=0.02)
+        nn.init.normal_(self.pos, std=cfg.pos_emb_std)
         self.blocks = nn.ModuleList(
             nn.TransformerEncoderLayer(d, cfg.n_dec_heads, cfg.d_ff, batch_first=True)
             for _ in range(cfg.n_dec_layers)
@@ -64,6 +69,71 @@ class SkeletonEncoder(nn.Module):
         return F.adaptive_avg_pool1d(h.transpose(1, 2), self.cfg.skel_len).transpose(1, 2)
 
 
+class VectorQuantizer(nn.Module):
+    """Cosine (L2-normalized) VQ codebook with straight-through gradients.
+    Turns the continuous skeleton into `skel_len` discrete codes, so stage-1
+    generation becomes a parallel classification problem instead of continuous
+    flow matching.
+
+    Both the encoder output and the codebook are L2-normalized before nearest-
+    neighbour lookup (quantize on the unit sphere). This removes the init
+    scale mismatch against a LayerNorm'd encoder and is the standard fix for
+    codebook collapse at small scale (ViT-VQGAN)."""
+
+    def __init__(self, cfg: O1AntiConfig):
+        super().__init__()
+        self.beta = cfg.vq_beta
+        self.codebook = nn.Embedding(cfg.codebook_size, cfg.d_model)
+        nn.init.normal_(self.codebook.weight, std=1.0)
+
+    def forward(self, z: torch.Tensor):
+        """z: (B, L, d) → (q_st: (B, L, d), codes: (B, L), vq_loss)."""
+        B, L, d = z.shape
+        z_n = F.normalize(z, dim=-1)
+        cb = F.normalize(self.codebook.weight, dim=-1)          # (K, d)
+        sim = torch.einsum("nd,kd->nk", z_n.reshape(-1, d), cb) # cosine sim
+        codes = sim.argmax(dim=-1)                              # (B*L,)
+        q = cb[codes].view(B, L, d)                            # unit-norm quantized
+        codes = codes.view(B, L)
+        vq_loss = F.mse_loss(q, z_n.detach()) + self.beta * F.mse_loss(z_n, q.detach())
+        q_st = z_n + (q - z_n).detach()                        # straight-through
+        return q_st, codes, vq_loss
+
+    def embed_codes(self, codes: torch.Tensor) -> torch.Tensor:
+        """codes: (B, L) → (B, L, d) unit-norm codebook vectors."""
+        cb = F.normalize(self.codebook.weight, dim=-1)
+        return cb[codes]
+
+
+class SkeletonPrior(nn.Module):
+    """Parallel prior: learned slot queries cross-attend into the prompt memory
+    and predict the skeleton in ONE pass, replacing the flow-matching ODE.
+
+    out_dim = codebook_size → discrete code logits (discrete mode);
+    out_dim = d_model       → continuous skeleton regression (regress mode)."""
+
+    def __init__(self, cfg: O1AntiConfig, out_dim: int):
+        super().__init__()
+        self.cfg = cfg
+        d = cfg.d_model
+        self.slots = nn.Parameter(torch.zeros(cfg.skel_len, d))
+        nn.init.normal_(self.slots, std=cfg.pos_emb_std)
+        # prompt memory needs position info so slots can address prompt order
+        self.mem_pos = nn.Parameter(torch.zeros(cfg.max_seq_len, d))
+        nn.init.normal_(self.mem_pos, std=cfg.pos_emb_std)
+        self.blocks = nn.ModuleList(DecoderBlock(cfg) for _ in range(cfg.n_dec_layers))
+        self.norm = nn.LayerNorm(d)
+        self.head = nn.Linear(d, out_dim)
+
+    def forward(self, mem: torch.Tensor) -> torch.Tensor:
+        """mem: (B, T_prompt, d) → (B, skel_len, out_dim)."""
+        mem = mem + self.mem_pos[: mem.shape[1]]
+        h = self.slots.unsqueeze(0).expand(mem.shape[0], -1, -1)
+        for blk in self.blocks:
+            h = blk(h, mem)
+        return self.head(self.norm(h))
+
+
 class SkeletonGenerator(nn.Module):
     """Flow-matching field over the skeleton — a small transformer that
     self-attends across skeleton slots and cross-attends into the encoded
@@ -76,7 +146,9 @@ class SkeletonGenerator(nn.Module):
         self.cfg = cfg
         d = cfg.d_model
         self.slot_pos = nn.Parameter(torch.zeros(cfg.skel_len, d))
-        nn.init.normal_(self.slot_pos, std=0.02)
+        nn.init.normal_(self.slot_pos, std=cfg.pos_emb_std)
+        self.mem_pos = nn.Parameter(torch.zeros(cfg.max_seq_len, d))
+        nn.init.normal_(self.mem_pos, std=cfg.pos_emb_std)
         self.t_proj = nn.Linear(d, d)
         self.blocks = nn.ModuleList(DecoderBlock(cfg) for _ in range(cfg.n_dec_layers))
         self.out = nn.Linear(d, d)
@@ -84,6 +156,7 @@ class SkeletonGenerator(nn.Module):
     def velocity(self, z: torch.Tensor, t: torch.Tensor, mem: torch.Tensor) -> torch.Tensor:
         """z: (B, L_skel, d), t: (B,), mem: (B, T_prompt, d) → (B, L_skel, d)."""
         temb = self.t_proj(timestep_embedding(t, self.cfg.d_model)).unsqueeze(1)
+        mem = mem + self.mem_pos[: mem.shape[1]]
         h = z + self.slot_pos[: z.shape[1]] + temb
         for blk in self.blocks:
             h = blk(h, mem)                       # self-attn + cross-attn into prompt
@@ -137,11 +210,7 @@ class ParallelDecoder(nn.Module):
         self.embed = embed                       # shared with the LM trunk
         self.mask_emb = nn.Parameter(torch.zeros(cfg.d_model))
         self.pos_emb = nn.Parameter(torch.zeros(cfg.max_seq_len, cfg.d_model))
-        nn.init.normal_(self.pos_emb, std=0.02)
-        # positional addressing INTO the skeleton, so output position i can
-        # align to its skeleton slot during cross-attention.
-        self.skel_pos = nn.Parameter(torch.zeros(cfg.skel_len, cfg.d_model))
-        nn.init.normal_(self.skel_pos, std=0.02)
+        nn.init.normal_(self.pos_emb, std=cfg.pos_emb_std)
         self.blocks = nn.ModuleList(DecoderBlock(cfg) for _ in range(cfg.n_dec_layers))
         self.norm = nn.LayerNorm(cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
@@ -153,7 +222,10 @@ class ParallelDecoder(nn.Module):
         h = self.embed(tokens)
         h = torch.where(masked.unsqueeze(-1), self.mask_emb.expand_as(h), h)
         h = h + self.pos_emb[: h.shape[1]]
-        skel = skel + self.skel_pos[: skel.shape[1]]      # positional keys
+        # SHARE the position embedding with the skeleton keys: query at output
+        # position i and key at skeleton slot i then share a strong positional
+        # component, giving cross-attention a diagonal alignment prior.
+        skel = skel + self.pos_emb[: skel.shape[1]]
         for blk in self.blocks:
             h = blk(h, skel)
         return self.head(self.norm(h))

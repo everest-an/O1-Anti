@@ -26,10 +26,27 @@ class O1AntiConfig:
 
     # --- pillar 3: liquid state-transition generation ---
     skel_len: int = 16      # semantic skeleton length (L_skel)
-    ode_steps: int = 8      # Euler steps for the flow-matching ODE
+    ode_steps: int = 8      # Euler steps for the flow-matching ODE (continuous mode)
     decode_iters: int = 3   # mask-predict refinement rounds
     n_dec_layers: int = 2   # parallel decoder depth
     n_dec_heads: int = 4
+    # Position-embedding init scale for the generation stack. MUST be O(1), not
+    # 0.02: when every position is masked the query is just mask_emb + pos, so a
+    # tiny pos makes all queries identical and cross-attention cannot tell
+    # positions apart (parallel decode collapses to ~random). std≈1 fixes it.
+    pos_emb_std: float = 1.0
+    # skeleton_mode:
+    #   "regress"  (deterministic prompt→skeleton predictor, 1 pass, default) —
+    #              works when the target is (near-)deterministic in the prompt.
+    #   "flow"     (flow-matching neural ODE, ode_steps passes) — stochastic.
+    #   "discrete" (VQ codebook + parallel code prior, 1 pass) — needs
+    #              residual/product VQ to raise capacity; research variant.
+    skeleton_mode: str = "regress"
+    codebook_size: int = 256   # VQ codebook entries (discrete mode)
+    vq_beta: float = 0.25      # commitment loss weight (discrete mode)
+    skel_noise: float = 0.5    # regress mode: Gaussian noise (× per-slot std)
+                               # added to the skeleton in decoder training so the
+                               # decoder tolerates the prior's regression error.
 
     # --- regularization ---
     state_continuity_coef: float = 1e-4

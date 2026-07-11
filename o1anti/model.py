@@ -18,7 +18,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import O1AntiConfig
-from .generation import ParallelDecoder, SkeletonEncoder, SkeletonGenerator
+from .generation import (
+    ParallelDecoder,
+    SkeletonEncoder,
+    SkeletonGenerator,
+    SkeletonPrior,
+    VectorQuantizer,
+)
 from .losses import flow_matching_loss, load_balance_loss
 from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary
 
@@ -44,8 +50,14 @@ class O1AntiModel(nn.Module):
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight
         self.skel_encoder = SkeletonEncoder(cfg)
-        self.skeleton = SkeletonGenerator(cfg)
         self.decoder = ParallelDecoder(cfg, self.embed)
+        if cfg.skeleton_mode == "regress":
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.d_model)
+        elif cfg.skeleton_mode == "discrete":
+            self.vq = VectorQuantizer(cfg)
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.codebook_size)
+        else:
+            self.skeleton = SkeletonGenerator(cfg)
 
     # ------------------------------------------------------------------ trunk
     def encode(self, input_ids: torch.Tensor):
@@ -75,27 +87,47 @@ class O1AntiModel(nn.Module):
 
     # ------------------------------------------------------- generation train
     def generation_loss(self, prompt_ids: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
-        """Stage-1 flow matching + stage-2 masked parallel decoding, both
-        conditioned on the prompt context (teacher skeleton for stage 2)."""
-        mem = self.embed(prompt_ids)                     # prompt memory (B,T,d)
+        """Stage-1 skeleton generation + stage-2 masked parallel decoding.
 
+        discrete mode (default): encoder → VQ codes; a parallel prior predicts
+        the codes from the prompt (cross-entropy); decoder reconstructs from the
+        quantized skeleton. Stage 1 is 1 parallel classification pass.
+        flow mode: flow-matching a continuous latent skeleton.
+        """
+        mem = self.embed(prompt_ids)                     # prompt memory (B,T,d)
         h_t = self.embed(target_ids)
         skel = self.skel_encoder(h_t)                    # learned latent skeleton
-        fm = flow_matching_loss(self.skeleton, skel, mem)
 
-        # decoder reconstructs from the (non-detached) skeleton so gradients
-        # train the encoder to produce an invertible compression.
+        if self.cfg.skeleton_mode == "regress":
+            pred = self.prior(mem)                        # (B, skel_len, d)
+            stage1 = F.mse_loss(pred, skel.detach())
+            # robustness: decode from a noise-perturbed skeleton so the decoder
+            # tolerates the prior's regression error at inference. σ scales with
+            # each slot's std so it matches the skeleton's dynamic range.
+            std = skel.detach().std(dim=-1, keepdim=True)
+            skel = skel + self.cfg.skel_noise * std * torch.randn_like(skel)
+        elif self.cfg.skeleton_mode == "discrete":
+            skel, codes, stage1 = self.vq(skel)          # quantize + VQ loss
+            prior_logits = self.prior(mem)               # (B, skel_len, K)
+            stage1 = stage1 + F.cross_entropy(
+                prior_logits.reshape(-1, self.cfg.codebook_size),
+                codes.detach().reshape(-1),
+            )
+        else:
+            stage1 = flow_matching_loss(self.skeleton, skel, mem)
+
         # CMLM masking: per-row mask ratio ~ U(0,1] so the decoder sees the
         # fully-masked regime it starts inference from, not just a fixed 50%.
         ratio = torch.rand(target_ids.shape[0], 1, device=target_ids.device)
         masked = torch.rand_like(target_ids, dtype=torch.float) < ratio
         masked |= ~masked.any(dim=-1, keepdim=True)  # at least one mask per row
+
         logits = self.decoder.logits(target_ids, masked, skel)
         dec = F.cross_entropy(
             logits[masked].reshape(-1, self.cfg.vocab_size),
             target_ids[masked].reshape(-1),
         )
-        return fm + dec
+        return stage1 + dec
 
     # ---------------------------------------------------------------- sampler
     @torch.no_grad()
@@ -105,9 +137,16 @@ class O1AntiModel(nn.Module):
         length: int,
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
-        """Non-autoregressive: ode_steps + decode_iters passes, not `length`."""
+        """Non-autoregressive. discrete: 1 (prior) + decode_iters passes;
+        flow: ode_steps + decode_iters passes. Never `length` passes."""
         mem = self.embed(prompt_ids)
-        skel = self.skeleton.sample(mem, generator=generator)
+        if self.cfg.skeleton_mode == "regress":
+            skel = self.prior(mem)                        # (B, skel_len, d)
+        elif self.cfg.skeleton_mode == "discrete":
+            codes = self.prior(mem).argmax(dim=-1)       # (B, skel_len)
+            skel = self.vq.embed_codes(codes)
+        else:
+            skel = self.skeleton.sample(mem, generator=generator)
         return self.decoder.mask_predict(skel, length)
 
     def num_parameters(self, active_only: bool = False) -> int:
