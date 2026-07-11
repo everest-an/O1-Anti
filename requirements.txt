@@ -1,6 +1,0 @@
-accelerate
-bitsandbytes>=0.43.0
-datasets
-open_clip_torch
-peft>=0.14.0
-transformers>=4.47.0
