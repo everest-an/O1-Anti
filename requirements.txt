@@ -16,3 +16,4 @@ huggingface_hub>=0.22.0
 #
 # Uncomment to enable quantum-circuit lateral coupling (PennyLane):
 # pennylane>=0.34.0
+pytest
