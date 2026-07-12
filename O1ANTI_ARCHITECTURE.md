@@ -122,6 +122,28 @@ raise codebook capacity (current single-code VQ caps fidelity). Reproduce:
 `python experiments/p3_parallel_decode.py --steps 2500 --length 48 --skel_len 48
 --decode_iters 6 --skeleton_mode regress`.
 
+### P4 — All three pillars in one model (integration)
+
+P1–P3 validate each pillar in isolation. P4 checks they **compose**: the real
+`O1AntiModel` conditions generation on the routed module trunk (pillar 2, with
+NLA from pillar 1 inside each module) and decodes non-autoregressively (pillar 3),
+trained end-to-end with one objective. Same reconstruction task, len 48, 2000
+steps, CPU:
+
+| Metric | Value |
+|---|---:|
+| End-to-end generated tok-acc | **1.000** |
+| Module path / library | 2 / 6 (pillar 2 live & sparse) |
+| Param activation ratio | **73.8%** (< 100%) |
+| Forward passes vs autoregressive | **7 vs 48** |
+
+**Go.** All three pillars run together in a single trained model: it generates at
+full accuracy, activates 74% of parameters (the module graph stays sparse — 2 of 6
+modules per input; the always-on generation stack is the rest), and needs 7 passes
+where autoregression needs 48. `test_generation_routes_through_module_trunk` locks
+in that the module library and router receive gradient during a pure generation
+step. Reproduce: `python experiments/p4_integrated.py --steps 2000 --length 48`.
+
 ## Layout
 
 ```
@@ -136,17 +158,19 @@ experiments/
   p1_nla_swap.py        # P1 — NLA vs dense attention
   p2_module_routing.py  # P2 — routed graph vs dense stack
   p3_parallel_decode.py # P3 — parallel decode vs autoregressive
+  p4_integrated.py      # P4 — all three pillars in one model
 tests/
-  test_o1anti.py   # shapes, causality, train/inference consistency
+  test_o1anti.py   # 14 tests: shapes, causality, consistency, all modes, P4
 ```
 
 ## Quick start
 
 ```bash
-python -m pytest tests/test_o1anti.py -q      # 13 tests
+python -m pytest tests/test_o1anti.py -q      # 14 tests
 python experiments/p1_nla_swap.py --steps 1500 --seq 32
 python experiments/p2_module_routing.py --steps 800 --regimes 4
 python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 --decode_iters 8
+python experiments/p4_integrated.py --steps 2000 --length 48
 ```
 
 Regression anchors (fail the run if a pillar's headline metric drops):

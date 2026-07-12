@@ -102,8 +102,15 @@ class O1AntiModel(nn.Module):
                      prompt (cross-entropy); decoder reconstructs from the codes.
           "flow":    flow-matching a continuous latent skeleton from noise.
         Stage-2 is always CMLM cross-entropy over the masked positions.
+
+        Pillar integration (P4): the prompt is encoded by the routed module trunk
+        (pillars 1+2 — NLA inside context-routed modules), and those hidden
+        states are the conditioning memory for the stage-1 generator (pillar 3).
+        The trunk's router aux losses are added so the trunk keeps training.
         """
-        mem = self.embed(prompt_ids)                     # prompt memory (B,T,d)
+        mem, _, usage, cont = self.encode(prompt_ids)    # routed trunk (P1+P2)
+        aux = (self.cfg.load_balance_coef * load_balance_loss(usage)
+               + self.cfg.state_continuity_coef * cont)
         h_t = self.embed(target_ids)
         skel = self.skel_encoder(h_t)                    # learned latent skeleton
 
@@ -136,7 +143,7 @@ class O1AntiModel(nn.Module):
             logits[masked].reshape(-1, self.cfg.vocab_size),
             target_ids[masked].reshape(-1),
         )
-        return stage1 + dec
+        return stage1 + dec + aux
 
     # ---------------------------------------------------------------- sampler
     @torch.no_grad()
@@ -147,8 +154,11 @@ class O1AntiModel(nn.Module):
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         """Non-autoregressive. discrete: 1 (prior) + decode_iters passes;
-        flow: ode_steps + decode_iters passes. Never `length` passes."""
-        mem = self.embed(prompt_ids)
+        flow: ode_steps + decode_iters passes. Never `length` passes.
+
+        The prompt is conditioned through the routed module trunk (pillars 1+2),
+        so all three pillars participate in generation."""
+        mem, _, _, _ = self.encode(prompt_ids)
         if self.cfg.skeleton_mode == "regress":
             skel = self.prior(mem)                        # (B, skel_len, d)
         elif self.cfg.skeleton_mode == "discrete":

@@ -128,6 +128,23 @@ def test_all_skeleton_modes_train_and_sample(mode):
     assert toks.max() < cfg.vocab_size and toks.min() >= 0
 
 
+def test_generation_routes_through_module_trunk():
+    """P4 integration: generation_loss must condition on the routed module trunk
+    (pillars 1+2), so the module library and router receive gradient during a
+    pure generation step — not just the generation stack."""
+    torch.manual_seed(0)
+    model = O1AntiModel(CFG).train()
+    prompt = torch.randint(0, CFG.vocab_size, (3, 8))
+    target = torch.randint(0, CFG.vocab_size, (3, 20))
+    model.generation_loss(prompt, target).backward()
+
+    def got_grad(module):
+        return any(p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters())
+
+    assert got_grad(model.library), "module library got no gradient from generation"
+    assert got_grad(model.router), "router got no gradient from generation"
+
+
 def test_skeleton_encoder_and_ode_shapes():
     from o1anti.generation import SkeletonEncoder
 

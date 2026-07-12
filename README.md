@@ -35,9 +35,11 @@ Full design and derivations: [`O1ANTI_ARCHITECTURE.md`](O1ANTI_ARCHITECTURE.md).
 | **P1** memory | NLA vs dense attention (selective copy) | 100% recall matching dense attention, **8× smaller** per-token cache | **GO** |
 | **P2** compute | Routed graph vs dense stack (regime classification) | 100% acc at **27% activation**, balanced module usage | **GO** |
 | **P3** latency | Parallel decode vs autoregressive (len-48 reconstruction) | AR-equal 1.000 in **14 passes vs 48** (3.4× fewer) | **GO** |
+| **P4** integration | All three pillars in one trained model | 1.000 generated at **74% activation, 7 passes vs 48** | **GO** |
 
-All three cost roots have a validated architectural answer at prototype scale.
-Scaling these to real language-model benchmarks is the next milestone.
+All three cost roots have a validated architectural answer at prototype scale, and
+P4 confirms they **compose** in a single end-to-end model. Scaling to real
+language-model benchmarks is the next milestone.
 
 ### P1 — Neural Liquid Adjacency (memory)
 
@@ -84,6 +86,14 @@ Three interchangeable stage-1 skeleton generators (`--skeleton_mode`):
 `regress` (deterministic, 1.000), `flow` (flow-matching neural ODE, 0.998),
 `discrete` (VQ codebook, 0.63; capacity-limited pending residual VQ).
 
+### P4 — All three pillars in one model
+
+The full `O1AntiModel` conditions generation on the routed module trunk (pillars
+1+2) and decodes non-autoregressively (pillar 3), trained end-to-end. It generates
+at **1.000** accuracy while activating **74%** of parameters (the module graph
+stays sparse — 2 of 6 modules per input) in **7 passes vs 48** for autoregression.
+The pillars compose without interference.
+
 > The decisive fix was a subtle one: position embeddings in the generation stack
 > must use O(1) init, not the usual 0.02. In mask-predict's first round every
 > position is masked, so a tiny position signal makes all queries identical and
@@ -99,6 +109,7 @@ python experiments/p1_nla_swap.py --steps 1500 --seq 32                     # P1
 python experiments/p2_module_routing.py --steps 800 --regimes 4            # P2
 python experiments/p3_parallel_decode.py --steps 2500 --length 48 \
        --skel_len 48 --decode_iters 6 --skeleton_mode regress             # P3
+python experiments/p4_integrated.py --steps 2000 --length 48               # P4
 ```
 
 Minimal end-to-end use:
@@ -128,8 +139,8 @@ o1anti/
   generation.py    # pillar 3 — SkeletonEncoder/Generator/Prior, VQ, ParallelDecoder
   losses.py        # load balance, state continuity, flow matching
   model.py         # O1AntiModel — LM path + generation path
-experiments/       # P1/P2/P3 go/no-go harnesses
-tests/             # 10 tests: shapes, causality, train/inference consistency
+experiments/       # P1–P4 go/no-go harnesses (p4_integrated = all pillars)
+tests/             # 14 tests: shapes, causality, consistency, all modes, P4
 ```
 
 ---
