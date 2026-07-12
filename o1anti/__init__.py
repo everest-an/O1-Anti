@@ -6,17 +6,37 @@ Three pillars, each attacking one Transformer cost root:
   1. nla.py          — Neural Liquid Adjacency: replaces O(n^2) attention +
                        KV cache with top-K dynamic sparse connections over
                        compressed per-position states (O(n*d_c) memory).
-  2. module_graph.py — Context-routed Neural Module Graph: a global router
-                       picks one module path per input, so only a small
-                       fraction of total parameters is ever activated.
-  3. generation.py   — Liquid state-transition generation: flow-matching
-                       neural-ODE semantic skeleton + parallel mask-predict
-                       decoding, replacing token-by-token autoregression.
+                       Multi-head (cfg.nla_heads) for attention-style mixing;
+                       cache size stays independent of head count.
+  2. module_graph.py — Neural Module Graph, two routing granularities
+                       (cfg.routing_granularity):
+                         "global" — one module path (NeuralModule, NLA+FFN)
+                                    per whole input (ContextEncoder + Global-
+                                    Router + ModuleLibrary); only path_len of
+                                    n_modules run per input.
+                         "token"  — dense NLA backbone + per-token routed
+                                    MoE-FFN (TokenMoETrunk/MoEBlock/
+                                    MoEFeedForward); finer-grained, used for
+                                    language modeling.
+  3. generation.py   — Liquid state-transition generation, non-autoregressive.
+                       Stage 1 (cfg.skeleton_mode) produces a compact semantic
+                       skeleton: "regress" (deterministic prior, default),
+                       "flow" (flow-matching neural ODE), or "discrete"
+                       (product-quantized VQ codes). Stage 2 (ParallelDecoder)
+                       emits all tokens at once via mask-predict.
 """
 
 from .config import O1AntiConfig
 from .nla import NeuralLiquidAdjacency, LiquidStateScan
-from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary, NeuralModule
+from .module_graph import (
+    ContextEncoder,
+    GlobalRouter,
+    ModuleLibrary,
+    NeuralModule,
+    MoEBlock,
+    MoEFeedForward,
+    TokenMoETrunk,
+)
 from .generation import (
     SkeletonEncoder,
     SkeletonGenerator,
@@ -35,6 +55,9 @@ __all__ = [
     "GlobalRouter",
     "ModuleLibrary",
     "NeuralModule",
+    "MoEBlock",
+    "MoEFeedForward",
+    "TokenMoETrunk",
     "SkeletonEncoder",
     "SkeletonGenerator",
     "SkeletonPrior",

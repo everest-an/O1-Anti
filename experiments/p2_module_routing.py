@@ -31,6 +31,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from o1anti import O1AntiConfig
+from o1anti.losses import load_balance_loss
 from o1anti.module_graph import ContextEncoder, GlobalRouter, ModuleLibrary, NeuralModule
 
 VOCAB = 32
@@ -107,7 +108,6 @@ def train_eval(model, args, device, is_routed):
         logits = model(ids)
         loss = F.cross_entropy(logits, labels)
         if is_routed:
-            from o1anti.losses import load_balance_loss
             loss = loss + model.cfg.load_balance_coef * load_balance_loss(model.last_usage)
         opt.zero_grad()
         loss.backward()

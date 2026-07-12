@@ -21,9 +21,18 @@ Run (CPU-feasible):
 
 import argparse
 import math
+import os
 import sys
 import time
 from pathlib import Path
+
+# Force offline mode BEFORE any datasets import: load_dataset() otherwise tries
+# a network round-trip to the HF Hub even when the corpus is already cached,
+# and on a flaky/absent connection this can hang for a very long time with
+# near-zero CPU (observed: >75 min stuck on 0.03s of CPU time). setdefault so
+# an explicit user override (e.g. to force a cache refresh) still works.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
 import torch
 import torch.nn as nn
@@ -93,7 +102,15 @@ class DenseLM(nn.Module):
 def lm_active_params(model, cfg) -> int:
     """Params actually used by the LM forward path: exclude the generation
     stack (pillar 3, unused in forward) and count only the active experts/modules.
-    Dedupes the tied embed/head weight."""
+    Dedupes the tied embed/head weight.
+
+    In "token" routing mode this is a per-token FLOPs-equivalent count (assumes
+    every token only ever touches moe_top_e experts) — the standard MoE-
+    literature convention (e.g. Switch Transformer's "active params" = compute
+    cost per token), matching model.num_parameters()'s documented semantics.
+    Different tokens in one sequence can route to different experts, so the
+    distinct parameters touched across a full forward pass can be larger.
+    """
     gen_mods = [getattr(model, n, None) for n in
                 ("skel_encoder", "decoder", "prior", "vq", "skeleton")]
     gen_ids = {id(p) for m in gen_mods if m is not None for p in m.parameters()}

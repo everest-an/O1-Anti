@@ -24,7 +24,7 @@ skeleton keys also SHARE the position embedding for a diagonal alignment prior.
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -128,8 +128,11 @@ class SkeletonPrior(nn.Module):
     """Parallel prior: learned slot queries cross-attend into the prompt memory
     and predict the skeleton in ONE pass, replacing the flow-matching ODE.
 
-    out_dim = codebook_size → discrete code logits (discrete mode);
-    out_dim = d_model       → continuous skeleton regression (regress mode)."""
+    out_dim = vq_groups * codebook_size → per-group discrete code logits,
+              reshaped by the caller to (B, skel_len, vq_groups, codebook_size)
+              (discrete mode, product-quantized — see VectorQuantizer);
+    out_dim = d_model                  → continuous skeleton regression
+              (regress mode)."""
 
     def __init__(self, cfg: O1AntiConfig, out_dim: int):
         super().__init__()

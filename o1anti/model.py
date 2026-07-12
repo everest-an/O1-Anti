@@ -184,6 +184,19 @@ class O1AntiModel(nn.Module):
         return self.decoder.mask_predict(skel, length)
 
     def num_parameters(self, active_only: bool = False) -> int:
+        """active_only has different semantics per routing_granularity:
+
+        "global": exact — only path_len of n_modules MODULES run for the whole
+            forward call, so this is the true set of parameters touched.
+        "token":  a per-token FLOPs-equivalent count (assumes every token only
+            ever touches moe_top_e experts). Different tokens in the same
+            sequence can route to different experts, so the DISTINCT parameters
+            touched across a full forward pass can exceed this number — up to
+            all n_modules experts for a long/diverse-enough sequence. This
+            matches standard MoE literature convention (e.g. Switch Transformer
+            "active params" = compute cost per token), not "params resident in
+            memory for this forward pass".
+        """
         total = sum(p.numel() for p in self.parameters())
         if not active_only:
             return total

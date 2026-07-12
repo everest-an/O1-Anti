@@ -28,10 +28,17 @@ Run:  python experiments/e10_real_needle.py --steps 1000 --lengths 128 256 512
 """
 
 import argparse
+import os
 import string
 import sys
 import time
 from pathlib import Path
+
+# Force offline mode BEFORE any datasets import — see train_o1anti.py for why:
+# load_dataset() can hang for a very long time on a network round-trip even
+# when the corpus is already cached (observed: >75 min stuck, ~0s CPU used).
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
 import torch
 import torch.nn as nn

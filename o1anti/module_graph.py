@@ -15,13 +15,14 @@ New capabilities can be added by growing the library and finetuning only the
 router — old modules stay frozen (incremental learning for free).
 """
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .config import O1AntiConfig
+from .losses import state_continuity_loss
 from .nla import NeuralLiquidAdjacency
 
 
@@ -104,8 +105,6 @@ class ModuleLibrary(nn.Module):
         Returns (h_out, continuity) where continuity is the mean liquid
         state-continuity penalty over all executed modules.
         """
-        from .losses import state_continuity_loss
-
         cont = h.new_zeros(())
         n_exec = 0
         for slot in range(self.cfg.path_len):
@@ -198,8 +197,6 @@ class TokenMoETrunk(nn.Module):
 
     def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """h: (B, T, d) → (h_out, usage (E,) averaged over layers, continuity)."""
-        from .losses import state_continuity_loss
-
         usage = h.new_zeros(self.cfg.n_modules)
         cont = h.new_zeros(())
         for blk in self.blocks:

@@ -1,6 +1,6 @@
 """config.py — single dataclass config for the O1-Anti (MTLNN v2) stack."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

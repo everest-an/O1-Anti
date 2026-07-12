@@ -40,7 +40,7 @@ from o1anti.generation import (
     SkeletonPrior,
     VectorQuantizer,
 )
-from o1anti.module_graph import ContextEncoder
+from o1anti.losses import flow_matching_loss
 
 VOCAB = 32
 
@@ -119,7 +119,6 @@ class ParallelGen(nn.Module):
             logits = self.prior(mem).view(*codes.shape[:2], G, K)
             stage1 = stage1 + F.cross_entropy(logits.reshape(-1, K), codes.detach().reshape(-1))
         else:
-            from o1anti.losses import flow_matching_loss
             stage1 = flow_matching_loss(self.skeleton, skel, mem)
         ratio = torch.rand(target.shape[0], 1, device=target.device)  # CMLM masking
         masked = torch.rand(target.shape, device=target.device) < ratio
