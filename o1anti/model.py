@@ -31,7 +31,7 @@ from .generation import (
     VectorQuantizer,
 )
 from .losses import flow_matching_loss, load_balance_loss
-from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary
+from .module_graph import ContextEncoder, GlobalRouter, ModuleLibrary, TokenMoETrunk
 
 
 @dataclass
@@ -48,9 +48,12 @@ class O1AntiModel(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.context = ContextEncoder(cfg)
-        self.router = GlobalRouter(cfg)
-        self.library = ModuleLibrary(cfg)
+        if cfg.routing_granularity == "token":
+            self.trunk = TokenMoETrunk(cfg)          # dense NLA + per-token MoE-FFN
+        else:
+            self.context = ContextEncoder(cfg)
+            self.router = GlobalRouter(cfg)
+            self.library = ModuleLibrary(cfg)        # one path per input
         self.norm = nn.LayerNorm(cfg.d_model)
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight
@@ -66,11 +69,19 @@ class O1AntiModel(nn.Module):
 
     # ------------------------------------------------------------------ trunk
     def encode(self, input_ids: torch.Tensor):
-        """→ (hidden (B,T,d), ctx (B,d_ctx), usage (M,), continuity scalar)."""
+        """→ (hidden (B,T,d), ctx (B,d_ctx)|None, usage (M,), continuity scalar).
+
+        "global" routing: context → router → one module path. "token" routing:
+        dense-NLA + per-token MoE-FFN trunk (finer-grained, better for LM).
+        """
         h = self.embed(input_ids)
-        ctx = self.context(h)
-        w, usage = self.router(ctx)
-        h, cont = self.library(h, w)
+        if self.cfg.routing_granularity == "token":
+            h, usage, cont = self.trunk(h)
+            ctx = None
+        else:
+            ctx = self.context(h)
+            w, usage = self.router(ctx)
+            h, cont = self.library(h, w)
         return self.norm(h), ctx, usage, cont
 
     def forward(self, input_ids: torch.Tensor, labels: Optional[torch.Tensor] = None) -> O1AntiOutput:
@@ -169,9 +180,14 @@ class O1AntiModel(nn.Module):
         return self.decoder.mask_predict(skel, length)
 
     def num_parameters(self, active_only: bool = False) -> int:
-        if not active_only:
-            return sum(p.numel() for p in self.parameters())
-        per_module = sum(p.numel() for p in self.library.modules_list[0].parameters())
         total = sum(p.numel() for p in self.parameters())
-        all_modules = per_module * self.cfg.n_modules
-        return total - all_modules + per_module * self.cfg.path_len
+        if not active_only:
+            return total
+        if self.cfg.routing_granularity == "token":
+            # dense NLA runs every layer; only moe_top_e of n_modules FFN
+            # experts fire per token, so (n_modules - top_e) experts/layer are idle.
+            per_expert = sum(p.numel() for p in self.trunk.blocks[0].moe.experts[0].parameters())
+            idle = per_expert * (self.cfg.n_modules - self.cfg.moe_top_e) * self.cfg.n_layers
+            return total - idle
+        per_module = sum(p.numel() for p in self.library.modules_list[0].parameters())
+        return total - per_module * (self.cfg.n_modules - self.cfg.path_len)

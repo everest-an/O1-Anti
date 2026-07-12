@@ -122,3 +122,89 @@ class ModuleLibrary(nn.Module):
                 out = out.index_copy(0, rows, h[rows] + g * (h_m - h[rows]))
             h = out
         return h, cont / max(n_exec, 1)
+
+
+# ---------------------------------------------------------------------------
+# Token-level (fine-grained) routing — MoE-FFN on a dense NLA backbone.
+# The global ModuleLibrary above routes one path per whole input, which is too
+# coarse for language modeling. Here NLA stays dense (coherent sequence mixing,
+# pillar 1) and only the FFN is routed per token to one of n_modules experts
+# (pillar 2, fine-grained). This is the standard MoE-Transformer split.
+# ---------------------------------------------------------------------------
+class MoEFeedForward(nn.Module):
+    """Per-token top-e routed FFN experts with a load-balance signal."""
+
+    def __init__(self, cfg: O1AntiConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.gate = nn.Linear(cfg.d_model, cfg.n_modules)
+        self.experts = nn.ModuleList(
+            nn.Sequential(nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(),
+                          nn.Linear(cfg.d_ff, cfg.d_model))
+            for _ in range(cfg.n_modules)
+        )
+
+    def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """h: (B, T, d) → (out, usage (E,)). Top-e experts per token, combined
+        by renormalized softmax gate weights; unselected experts don't run."""
+        B, T, d = h.shape
+        E, top_e = self.cfg.n_modules, self.cfg.moe_top_e
+        flat = h.reshape(-1, d)                               # (N, d)
+        probs = F.softmax(self.gate(flat), dim=-1)            # (N, E)
+        topw, topi = probs.topk(top_e, dim=-1)               # (N, top_e)
+        topw = topw / topw.sum(dim=-1, keepdim=True)          # renormalize
+
+        out = torch.zeros_like(flat)
+        for m in range(E):
+            sel = (topi == m)                                # (N, top_e) bool
+            tok = sel.any(dim=-1)                            # (N,) token uses expert m
+            if not tok.any():
+                continue
+            rows = tok.nonzero(as_tuple=True)[0]
+            w = (topw * sel).sum(dim=-1)[rows].unsqueeze(-1)  # this token's weight on m
+            out[rows] += w * self.experts[m](flat[rows])
+        # load-balance: fraction of tokens routed to each expert × mean gate prob
+        frac = torch.zeros(E, device=h.device)
+        frac.scatter_add_(0, topi.reshape(-1), torch.ones_like(topi.reshape(-1), dtype=h.dtype))
+        frac = frac / frac.sum().clamp_min(1.0)
+        usage = 0.5 * (frac + probs.mean(dim=0))             # blend count + prob mass
+        return out.reshape(B, T, d), usage
+
+
+class MoEBlock(nn.Module):
+    """Dense NLA (pillar 1) + per-token routed MoE-FFN (pillar 2)."""
+
+    def __init__(self, cfg: O1AntiConfig):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(cfg.d_model)
+        self.nla = NeuralLiquidAdjacency(cfg)
+        self.norm2 = nn.LayerNorm(cfg.d_model)
+        self.moe = MoEFeedForward(cfg)
+
+    def forward(self, h: torch.Tensor):
+        mixed, s = self.nla(self.norm1(h))
+        h = h + mixed
+        ffn, usage = self.moe(self.norm2(h))
+        return h + ffn, s, usage
+
+
+class TokenMoETrunk(nn.Module):
+    """Stack of MoE blocks — the fine-grained-routing trunk for language modeling."""
+
+    def __init__(self, cfg: O1AntiConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.blocks = nn.ModuleList(MoEBlock(cfg) for _ in range(cfg.n_layers))
+
+    def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """h: (B, T, d) → (h_out, usage (E,) averaged over layers, continuity)."""
+        from .losses import state_continuity_loss
+
+        usage = h.new_zeros(self.cfg.n_modules)
+        cont = h.new_zeros(())
+        for blk in self.blocks:
+            h, s, u = blk(h)
+            usage = usage + u
+            cont = cont + state_continuity_loss(s)
+        n = len(self.blocks)
+        return h, usage / n, cont / n

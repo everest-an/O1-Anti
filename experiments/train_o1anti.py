@@ -92,15 +92,18 @@ class DenseLM(nn.Module):
 # ------------------------------------------------------------ param count
 def lm_active_params(model, cfg) -> int:
     """Params actually used by the LM forward path: exclude the generation
-    stack (pillar 3, unused in forward) and count only path_len active modules.
+    stack (pillar 3, unused in forward) and count only the active experts/modules.
     Dedupes the tied embed/head weight."""
     gen_mods = [getattr(model, n, None) for n in
                 ("skel_encoder", "decoder", "prior", "vq", "skeleton")]
     gen_ids = {id(p) for m in gen_mods if m is not None for p in m.parameters()}
     kept = {id(p): p for p in model.parameters() if id(p) not in gen_ids}  # dedup tied
     total = sum(p.numel() for p in kept.values())
+    if cfg.routing_granularity == "token":
+        per_expert = sum(p.numel() for p in model.trunk.blocks[0].moe.experts[0].parameters())
+        return total - per_expert * (cfg.n_modules - cfg.moe_top_e) * cfg.n_layers
     per_module = sum(p.numel() for p in model.library.modules_list[0].parameters())
-    return total - per_module * (cfg.n_modules - cfg.path_len)  # only active modules
+    return total - per_module * (cfg.n_modules - cfg.path_len)
 
 
 # ------------------------------------------------------------------- train
@@ -151,6 +154,10 @@ def main():
     ap.add_argument("--n_modules", type=int, default=6)
     ap.add_argument("--path_len", type=int, default=3)
     ap.add_argument("--top_k", type=int, default=16)
+    ap.add_argument("--routing", choices=["global", "token"], default="global",
+                    help="global = one path per input; token = per-token MoE-FFN")
+    ap.add_argument("--n_layers", type=int, default=3, help="trunk depth for token routing")
+    ap.add_argument("--moe_top_e", type=int, default=1, help="experts per token (token routing)")
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -172,11 +179,14 @@ def main():
         n_modules=args.n_modules, path_len=args.path_len, top_k=args.top_k,
         d_ff=4 * args.d_model, d_c=args.d_model // 4, d_state=args.d_model // 2,
         d_ctx=args.d_model, skeleton_mode="regress",
+        routing_granularity=args.routing, n_layers=args.n_layers, moe_top_e=args.moe_top_e,
     )
     o1 = O1AntiModel(cfg).to(device)
     o1_active = lm_active_params(o1, cfg)
-    print(f"\n[O1-Anti] active LM params ~{o1_active:,} "
-          f"(path {args.path_len}/{args.n_modules} modules; generation stack excluded)")
+    routing_desc = (f"token MoE {args.moe_top_e}/{args.n_modules} experts × {args.n_layers} layers"
+                    if args.routing == "token" else
+                    f"global path {args.path_len}/{args.n_modules} modules")
+    print(f"\n[O1-Anti] active LM params ~{o1_active:,} ({routing_desc}; gen stack excluded)")
     o1_time = train(o1, data_tr, data_va, args, device, is_o1anti=True)
     o1_bpb = evaluate(o1, data_va, args.batch, args.seq, 40, device, True) / math.log(2)
 

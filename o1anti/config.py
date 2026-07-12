@@ -22,12 +22,21 @@ class O1AntiConfig:
     nla_route_noise: float = 0.0
 
     # --- pillar 2: Neural Module Graph ---
-    n_modules: int = 8      # module library size (M)
-    path_len: int = 4       # modules executed per input (L)
+    n_modules: int = 8      # module library size (M) / MoE expert count
+    path_len: int = 4       # modules executed per input (L) — "global" routing
     d_ctx: int = 64         # context embedding dim
     router_tau: float = 1.0         # gumbel-softmax temperature
     load_balance_coef: float = 0.01
-    d_ff: int = 256         # FFN width inside a module
+    d_ff: int = 256         # FFN width inside a module / MoE expert
+    # routing_granularity:
+    #   "global" — one module path per whole input (context-routed). Validated
+    #              on the P2 classification task; too coarse for language modeling.
+    #   "token"  — dense NLA backbone (pillar 1) + per-TOKEN routed MoE-FFN
+    #              (pillar 2, fine-grained). n_layers blocks; each token picks
+    #              moe_top_e of n_modules FFN experts. Better for real LM.
+    routing_granularity: str = "global"
+    n_layers: int = 4       # trunk depth for token-MoE routing
+    moe_top_e: int = 1      # experts activated per token (top-e)
 
     # --- pillar 3: liquid state-transition generation ---
     skel_len: int = 16      # semantic skeleton length (L_skel)

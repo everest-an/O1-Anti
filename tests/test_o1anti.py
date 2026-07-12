@@ -128,6 +128,40 @@ def test_all_skeleton_modes_train_and_sample(mode):
     assert toks.max() < cfg.vocab_size and toks.min() >= 0
 
 
+def test_token_moe_routing_trains():
+    """Token-granularity trunk: dense NLA + per-token MoE-FFN. Must build, do a
+    causal-LM step, keep causality, and route gradient to multiple experts."""
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, routing_granularity="token", n_layers=2, moe_top_e=1)
+    torch.manual_seed(0)
+    model = O1AntiModel(cfg).train()
+    ids = torch.randint(0, cfg.vocab_size, (2, 16))
+    out = model(ids, labels=ids)
+    out.loss.backward()
+    experts = model.trunk.blocks[0].moe.experts
+    got = sum(1 for e in experts
+              if any(p.grad is not None and p.grad.abs().sum() > 0 for p in e.parameters()))
+    assert got >= 2, f"only {got} experts received gradient (routing may be collapsed)"
+    # active LM params must be < total (some experts idle per token)
+    assert model.num_parameters(active_only=True) < model.num_parameters()
+
+
+def test_token_moe_causality():
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, routing_granularity="token", n_layers=2)
+    torch.manual_seed(0)
+    model = O1AntiModel(cfg).eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, 20))
+    with torch.no_grad():
+        h1 = model.encode(ids)[0]
+        ids2 = ids.clone()
+        ids2[:, 15:] = torch.randint(0, cfg.vocab_size, (1, 5))
+        h2 = model.encode(ids2)[0]
+    assert torch.allclose(h1[:, :15], h2[:, :15], atol=1e-4), "token trunk broke causality"
+
+
 def test_generation_routes_through_module_trunk():
     """P4 integration: generation_loss must condition on the routed module trunk
     (pillars 1+2), so the module library and router receive gradient during a
