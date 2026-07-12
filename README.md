@@ -7,7 +7,7 @@
 **Attack the three cost roots of the Transformer — one architectural pillar each.**
 
 [![MIT License](https://img.shields.io/badge/License-MIT-success?style=for-the-badge)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-10_passing-brightgreen?style=for-the-badge)](tests/test_o1anti.py)
+[![Tests](https://img.shields.io/badge/tests-18_passing-brightgreen?style=for-the-badge)](tests/test_o1anti.py)
 
 Dynamic sparse memory · Context-routed sparse compute · Non-autoregressive generation
 
@@ -90,9 +90,11 @@ rounds. A length-`n` generation costs `stage1 + decode_iters` passes, not `n`.
 | Autoregressive baseline | 1.000 | 48 |
 | **Parallel, end-to-end** | 1.000 | **14 (3.4× fewer)** |
 
-Three interchangeable stage-1 skeleton generators (`--skeleton_mode`):
-`regress` (deterministic, 1.000), `flow` (flow-matching neural ODE, 0.998),
-`discrete` (VQ codebook, 0.63; capacity-limited pending residual VQ).
+Three interchangeable stage-1 skeleton generators (`--skeleton_mode`), all now at
+parity: `regress` (deterministic, 1.000), `flow` (flow-matching neural ODE,
+0.998), `discrete` (product-quantized VQ codes, 1.000 — fixed from an earlier
+0.63 by splitting the codebook into independent subvector groups, see
+`O1ANTI_ARCHITECTURE.md` § E9).
 
 ### P4 — All three pillars in one model
 
@@ -111,7 +113,7 @@ The pillars compose without interference.
 
 ```bash
 pip install torch numpy
-python -m pytest tests/test_o1anti.py -q                                   # 10 tests
+python -m pytest tests/test_o1anti.py -q                                   # 18 tests
 
 python experiments/p1_nla_swap.py --steps 1500 --seq 32                     # P1
 python experiments/p2_module_routing.py --steps 800 --regimes 4            # P2
@@ -148,7 +150,7 @@ o1anti/
   losses.py        # load balance, state continuity, flow matching
   model.py         # O1AntiModel — LM path + generation path
 experiments/       # P1–P4 go/no-go harnesses (p4_integrated = all pillars)
-tests/             # 14 tests: shapes, causality, consistency, all modes, P4
+tests/             # 18 tests: shapes, causality, consistency, all modes, P4, multi-head NLA, PQ
 ```
 
 ---

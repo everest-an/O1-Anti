@@ -60,8 +60,14 @@ class O1AntiConfig:
     #   "discrete" (VQ codebook + parallel code prior, 1 pass) — needs
     #              residual/product VQ to raise capacity; research variant.
     skeleton_mode: str = "regress"
-    codebook_size: int = 256   # VQ codebook entries (discrete mode)
+    codebook_size: int = 256   # entries per VQ codebook (discrete mode)
     vq_beta: float = 0.25      # commitment loss weight (discrete mode)
+    # Product quantization: split d_model into vq_groups independent subvectors,
+    # each with its OWN codebook_size-entry codebook. Combinatorial code space is
+    # codebook_size^vq_groups while total codebook params stay codebook_size*d_model
+    # (same as a single codebook). Fixes the single-codebook fidelity cap (E9 —
+    # was capped at cos-sim~0.63 / 0.63 decode acc with vq_groups=1).
+    vq_groups: int = 4
     skel_noise: float = 0.5    # regress mode: Gaussian noise (× per-slot std)
                                # added to the skeleton in decoder training so the
                                # decoder tolerates the prior's regression error.
@@ -75,3 +81,4 @@ class O1AntiConfig:
         assert self.top_k >= 1
         assert self.path_len <= self.n_modules or self.n_modules > 0
         assert self.d_model % self.nla_heads == 0, "d_model must divide nla_heads"
+        assert self.d_model % self.vq_groups == 0, "d_model must divide vq_groups"

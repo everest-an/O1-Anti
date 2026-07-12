@@ -70,39 +70,58 @@ class SkeletonEncoder(nn.Module):
 
 
 class VectorQuantizer(nn.Module):
-    """Cosine (L2-normalized) VQ codebook with straight-through gradients.
-    Turns the continuous skeleton into `skel_len` discrete codes, so stage-1
-    generation becomes a parallel classification problem instead of continuous
-    flow matching.
+    """Product-quantized (cosine, L2-normalized) codebook with straight-through
+    gradients. Turns the continuous skeleton into `skel_len` discrete codes, so
+    stage-1 generation becomes a parallel classification problem instead of
+    continuous flow matching.
 
-    Both the encoder output and the codebook are L2-normalized before nearest-
-    neighbour lookup (quantize on the unit sphere). This removes the init
-    scale mismatch against a LayerNorm'd encoder and is the standard fix for
-    codebook collapse at small scale (ViT-VQGAN)."""
+    d_model is split into `vq_groups` independent subvectors, each with its own
+    codebook_size-entry codebook (product quantization / PQ). Combinatorial code
+    space is codebook_size^vq_groups while total codebook params stay
+    codebook_size*d_model — same footprint as one codebook. This fixes the
+    fidelity cap of a single codebook (E9): with vq_groups=1 the nearest code was
+    only cos-sim~0.63 to the target on real data, capping decode accuracy at
+    0.63; splitting into groups quantizes each low-dimensional subvector far more
+    precisely (curse-of-dimensionality effect on nearest-neighbour matching).
+
+    Each subvector and its codebook are L2-normalized before nearest-neighbour
+    lookup (quantize on the unit sphere) — the standard fix for codebook
+    collapse at small scale (ViT-VQGAN), unaffected by grouping."""
 
     def __init__(self, cfg: O1AntiConfig):
         super().__init__()
         self.beta = cfg.vq_beta
-        self.codebook = nn.Embedding(cfg.codebook_size, cfg.d_model)
-        nn.init.normal_(self.codebook.weight, std=1.0)
+        self.G = cfg.vq_groups
+        self.dg = cfg.d_model // self.G
+        self.codebooks = nn.ModuleList(
+            nn.Embedding(cfg.codebook_size, self.dg) for _ in range(self.G)
+        )
+        for cb in self.codebooks:
+            nn.init.normal_(cb.weight, std=1.0)
 
     def forward(self, z: torch.Tensor):
-        """z: (B, L, d) → (q_st: (B, L, d), codes: (B, L), vq_loss)."""
+        """z: (B, L, d) → (q_st: (B, L, d), codes: (B, L, G), vq_loss)."""
         B, L, d = z.shape
-        z_n = F.normalize(z, dim=-1)
-        cb = F.normalize(self.codebook.weight, dim=-1)          # (K, d)
-        sim = torch.einsum("nd,kd->nk", z_n.reshape(-1, d), cb) # cosine sim
-        codes = sim.argmax(dim=-1)                              # (B*L,)
-        q = cb[codes].view(B, L, d)                            # unit-norm quantized
-        codes = codes.view(B, L)
-        vq_loss = F.mse_loss(q, z_n.detach()) + self.beta * F.mse_loss(z_n, q.detach())
-        q_st = z_n + (q - z_n).detach()                        # straight-through
-        return q_st, codes, vq_loss
+        z_g = F.normalize(z.view(B, L, self.G, self.dg), dim=-1)   # (B,L,G,dg)
+        q_parts, code_parts, vq_loss = [], [], 0.0
+        for g in range(self.G):
+            cb = F.normalize(self.codebooks[g].weight, dim=-1)     # (K, dg)
+            zg = z_g[:, :, g, :]                                    # (B,L,dg)
+            sim = torch.einsum("bld,kd->blk", zg, cb)
+            codes = sim.argmax(dim=-1)                              # (B,L)
+            q = cb[codes]                                           # (B,L,dg)
+            vq_loss = vq_loss + F.mse_loss(q, zg.detach()) + self.beta * F.mse_loss(zg, q.detach())
+            q_parts.append(zg + (q - zg).detach())                  # straight-through
+            code_parts.append(codes)
+        q_st = torch.cat(q_parts, dim=-1)                          # (B, L, d), unit-norm per group
+        codes = torch.stack(code_parts, dim=-1)                    # (B, L, G)
+        return q_st, codes, vq_loss / self.G
 
     def embed_codes(self, codes: torch.Tensor) -> torch.Tensor:
-        """codes: (B, L) → (B, L, d) unit-norm codebook vectors."""
-        cb = F.normalize(self.codebook.weight, dim=-1)
-        return cb[codes]
+        """codes: (B, L, G) → (B, L, d) unit-norm-per-group codebook vectors."""
+        parts = [F.normalize(self.codebooks[g].weight, dim=-1)[codes[..., g]]
+                 for g in range(self.G)]
+        return torch.cat(parts, dim=-1)
 
 
 class SkeletonPrior(nn.Module):

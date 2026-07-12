@@ -17,6 +17,7 @@ from o1anti import (
     O1AntiModel,
     ParallelDecoder,
     SkeletonGenerator,
+    VectorQuantizer,
 )
 from o1anti.losses import load_balance_loss
 
@@ -127,6 +128,33 @@ def test_generation_loss_and_sample():
     toks = model.generate(prompt, length=24, generator=gen)
     assert toks.shape == (2, 24)
     assert toks.max() < CFG.vocab_size and toks.min() >= 0
+
+
+def test_product_quantizer_shapes_and_fidelity():
+    """E9: product quantization (vq_groups independent codebooks) must (a) shape
+    codes as (B, L, G), (b) reconstruct without a shape/dtype error via
+    embed_codes, and (c) raise fidelity vs a single codebook (the E9 fix — a
+    single codebook capped cosine fidelity around ~0.3-0.6 on this scale)."""
+    torch.manual_seed(0)
+    d = 32
+    z = F.normalize(torch.randn(8, 6, d), dim=-1)
+
+    def mean_cos(groups):
+        cfg = O1AntiConfig(vocab_size=16, d_model=d, max_seq_len=8, skel_len=6,
+                           codebook_size=64, vq_groups=groups)
+        vq = VectorQuantizer(cfg)
+        q, codes, _ = vq(z)
+        assert codes.shape == (8, 6, groups)
+        assert q.shape == z.shape
+        rebuilt = vq.embed_codes(codes)
+        assert torch.allclose(q, rebuilt, atol=1e-5)
+        zg = F.normalize(z.view(8, 6, groups, d // groups), dim=-1)
+        qg = F.normalize(q.view(8, 6, groups, d // groups), dim=-1)
+        return (zg * qg).sum(-1).mean().item()
+
+    cos_g1 = mean_cos(1)
+    cos_g4 = mean_cos(4)
+    assert cos_g4 > cos_g1, f"grouping should raise fidelity: G=1 {cos_g1:.3f} vs G=4 {cos_g4:.3f}"
 
 
 @pytest.mark.parametrize("mode", ["regress", "flow", "discrete"])

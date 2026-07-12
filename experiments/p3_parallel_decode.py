@@ -102,7 +102,7 @@ class ParallelGen(nn.Module):
             self.prior = SkeletonPrior(cfg, out_dim=cfg.d_model)
         elif cfg.skeleton_mode == "discrete":
             self.vq = VectorQuantizer(cfg)
-            self.prior = SkeletonPrior(cfg, out_dim=cfg.codebook_size)
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.vq_groups * cfg.codebook_size)
         else:
             self.skeleton = SkeletonGenerator(cfg)
 
@@ -114,11 +114,10 @@ class ParallelGen(nn.Module):
             std = skel.detach().std(dim=-1, keepdim=True)   # noise-robust decoder
             skel = skel + self.cfg.skel_noise * std * torch.randn_like(skel)
         elif self.cfg.skeleton_mode == "discrete":
-            skel, codes, stage1 = self.vq(skel)
-            stage1 = stage1 + F.cross_entropy(
-                self.prior(mem).reshape(-1, self.cfg.codebook_size),
-                codes.detach().reshape(-1),
-            )
+            skel, codes, stage1 = self.vq(skel)          # codes: (B, L, G)
+            G, K = self.cfg.vq_groups, self.cfg.codebook_size
+            logits = self.prior(mem).view(*codes.shape[:2], G, K)
+            stage1 = stage1 + F.cross_entropy(logits.reshape(-1, K), codes.detach().reshape(-1))
         else:
             from o1anti.losses import flow_matching_loss
             stage1 = flow_matching_loss(self.skeleton, skel, mem)
@@ -134,7 +133,9 @@ class ParallelGen(nn.Module):
         if self.cfg.skeleton_mode == "regress":
             skel = self.prior(mem)
         elif self.cfg.skeleton_mode == "discrete":
-            skel = self.vq.embed_codes(self.prior(mem).argmax(dim=-1))
+            G, K = self.cfg.vq_groups, self.cfg.codebook_size
+            logits = self.prior(mem).view(mem.shape[0], self.cfg.skel_len, G, K)
+            skel = self.vq.embed_codes(logits.argmax(dim=-1))
         else:
             skel = self.skeleton.sample(mem)
         return self.decoder.mask_predict(skel, length)

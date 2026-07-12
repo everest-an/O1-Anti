@@ -63,7 +63,8 @@ class O1AntiModel(nn.Module):
             self.prior = SkeletonPrior(cfg, out_dim=cfg.d_model)
         elif cfg.skeleton_mode == "discrete":
             self.vq = VectorQuantizer(cfg)
-            self.prior = SkeletonPrior(cfg, out_dim=cfg.codebook_size)
+            # one code per product-quantization group per slot
+            self.prior = SkeletonPrior(cfg, out_dim=cfg.vq_groups * cfg.codebook_size)
         else:
             self.skeleton = SkeletonGenerator(cfg)
 
@@ -134,10 +135,11 @@ class O1AntiModel(nn.Module):
             std = skel.detach().std(dim=-1, keepdim=True)
             skel = skel + self.cfg.skel_noise * std * torch.randn_like(skel)
         elif self.cfg.skeleton_mode == "discrete":
-            skel, codes, stage1 = self.vq(skel)          # quantize + VQ loss
-            prior_logits = self.prior(mem)               # (B, skel_len, K)
+            skel, codes, stage1 = self.vq(skel)          # quantize + VQ loss; codes (B,L,G)
+            G, K = self.cfg.vq_groups, self.cfg.codebook_size
+            prior_logits = self.prior(mem).view(*codes.shape[:2], G, K)  # (B, L, G, K)
             stage1 = stage1 + F.cross_entropy(
-                prior_logits.reshape(-1, self.cfg.codebook_size),
+                prior_logits.reshape(-1, K),
                 codes.detach().reshape(-1),
             )
         else:
@@ -173,7 +175,9 @@ class O1AntiModel(nn.Module):
         if self.cfg.skeleton_mode == "regress":
             skel = self.prior(mem)                        # (B, skel_len, d)
         elif self.cfg.skeleton_mode == "discrete":
-            codes = self.prior(mem).argmax(dim=-1)       # (B, skel_len)
+            G, K = self.cfg.vq_groups, self.cfg.codebook_size
+            logits = self.prior(mem).view(mem.shape[0], self.cfg.skel_len, G, K)
+            codes = logits.argmax(dim=-1)                # (B, skel_len, G)
             skel = self.vq.embed_codes(codes)
         else:
             skel = self.skeleton.sample(mem, generator=generator)

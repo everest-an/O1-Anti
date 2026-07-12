@@ -91,8 +91,9 @@ Full end-to-end (prompt → skeleton → parallel decode), 2500 steps, CPU:
 
 **Go.** The full non-autoregressive pipeline reaches AR-equal accuracy (1.000)
 generating all 48 tokens in **14 passes vs 48** — a 3.4× pass-count and 3.3×
-wall-clock speedup. Stage 1 (`regress`) and stage 2 both proven; the other
-skeleton modes also work end-to-end (`flow` 0.998, `discrete` 0.63 — see below).
+wall-clock speedup. Stage 1 (`regress`) and stage 2 both proven; all three
+skeleton modes now reach ~1.000 end-to-end (`flow` 0.998, `discrete` 1.000 after
+the E9 fix below).
 
 Getting here took finding one decisive bug and two design fixes:
 
@@ -114,13 +115,29 @@ Three interchangeable **stage-1** skeleton generators (`--skeleton_mode`):
 |---|---|---:|---:|
 | `regress` (default) | deterministic prior (prompt→skeleton MSE + noise-robust decode) | 1 | **1.000** |
 | `flow` | flow-matching neural ODE (stochastic) | `ode_steps` | 0.998 |
-| `discrete` | VQ codebook + parallel code prior | 1 | 0.63 |
+| `discrete` | product-quantized VQ codes + parallel code prior | 1 | **1.000** (E9) |
 
 `regress` is best when the target is (near-)deterministic in the prompt; `flow`
-is the stochastic/diverse-sampling path; `discrete` needs residual/product VQ to
-raise codebook capacity (current single-code VQ caps fidelity). Reproduce:
-`python experiments/p3_parallel_decode.py --steps 2500 --length 48 --skel_len 48
---decode_iters 6 --skeleton_mode regress`.
+is the stochastic/diverse-sampling path; `discrete` gives a genuinely discrete
+latent (useful for downstream discrete-token pipelines) with no quality loss
+after E9.
+
+**E9 — product quantization fixed `discrete` (0.63 → 1.000).** The single
+codebook (`vq_groups=1`) capped nearest-neighbour fidelity at cos-sim≈0.6 —
+curse-of-dimensionality on `d_model`-dim nearest-neighbour search with a
+codebook_size=256 codebook. Fix: split `d_model` into `vq_groups=4` independent
+subvectors, each with its own 256-entry codebook (product quantization). Same
+total codebook parameters (`codebook_size × d_model`), but combinatorial code
+space grows to `codebook_size^vq_groups` and each low-dimensional
+nearest-neighbour match is far more precise. Measured fidelity (untrained,
+random target): mean cos-sim 0.29 (G=1) → 0.55 (G=4) → 0.72 (G=8). End-to-end
+P3 discrete-mode result: **1.000 generated accuracy in 7 passes vs AR's 48**,
+matching `regress`/`flow`. Locked in by
+`test_product_quantizer_shapes_and_fidelity`.
+
+Reproduce: `python experiments/p3_parallel_decode.py --steps 2500 --length 48
+--skel_len 48 --decode_iters 6 --skeleton_mode regress` (or `--skeleton_mode
+discrete` for the E9 result).
 
 ### P4 — All three pillars in one model (integration)
 
@@ -220,13 +237,13 @@ experiments/
   p4_integrated.py      # P4 — all three pillars in one model
   train_o1anti.py       # E8 — real-text byte-level LM, BPB vs dense
 tests/
-  test_o1anti.py   # 14 tests: shapes, causality, consistency, all modes, P4
+  test_o1anti.py   # 18 tests: shapes, causality, consistency, all modes, P4, multi-head NLA, PQ
 ```
 
 ## Quick start
 
 ```bash
-python -m pytest tests/test_o1anti.py -q      # 14 tests
+python -m pytest tests/test_o1anti.py -q      # 18 tests
 python experiments/p1_nla_swap.py --steps 1500 --seq 32
 python experiments/p2_module_routing.py --steps 800 --regimes 4
 python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 --decode_iters 8
