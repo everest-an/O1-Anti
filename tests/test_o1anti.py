@@ -104,6 +104,30 @@ def test_generation_loss_and_sample():
     assert toks.max() < CFG.vocab_size and toks.min() >= 0
 
 
+@pytest.mark.parametrize("mode", ["regress", "flow", "discrete"])
+def test_all_skeleton_modes_train_and_sample(mode):
+    """Every stage-1 skeleton_mode must build, backprop, and sample. Only
+    'regress' was exercised before; flow/discrete were experiment-only."""
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, skeleton_mode=mode)
+    torch.manual_seed(0)
+    model = O1AntiModel(cfg).train()
+    prompt = torch.randint(0, cfg.vocab_size, (2, 8))
+    target = torch.randint(0, cfg.vocab_size, (2, 20))
+    loss = model.generation_loss(prompt, target)
+    assert torch.isfinite(loss)
+    loss.backward()
+    # stage-1 params must receive gradient
+    stage1 = model.prior if mode != "flow" else model.skeleton
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in stage1.parameters())
+
+    model.eval()
+    toks = model.generate(prompt, length=20)
+    assert toks.shape == (2, 20)
+    assert toks.max() < cfg.vocab_size and toks.min() >= 0
+
+
 def test_skeleton_encoder_and_ode_shapes():
     from o1anti.generation import SkeletonEncoder
 
@@ -138,9 +162,10 @@ def test_parallel_decoder_reconstructs_aligned_skeleton():
     embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
     skel_embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
     dec = ParallelDecoder(cfg, embed)
-    opt = torch.optim.AdamW(
-        list(embed.parameters()) + list(skel_embed.parameters()) + list(dec.parameters()), lr=3e-3
-    )
+    # dedupe: dec.head.weight is tied to embed.weight, so the naive concat would
+    # hand AdamW the same tensor twice (a warning today, an error in future torch).
+    params = {id(p): p for m in (embed, skel_embed, dec) for p in m.parameters()}
+    opt = torch.optim.AdamW(list(params.values()), lr=3e-3)
     L = 24
     for _ in range(400):
         t = torch.randint(0, cfg.vocab_size, (32, L))

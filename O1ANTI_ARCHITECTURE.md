@@ -143,10 +143,18 @@ tests/
 ## Quick start
 
 ```bash
-python -m pytest tests/test_o1anti.py -q      # 9 tests
+python -m pytest tests/test_o1anti.py -q      # 13 tests
 python experiments/p1_nla_swap.py --steps 1500 --seq 32
 python experiments/p2_module_routing.py --steps 800 --regimes 4
 python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 --decode_iters 8
+```
+
+Regression anchors (fail the run if a pillar's headline metric drops):
+
+```bash
+python experiments/p2_module_routing.py --steps 800 --regimes 4 --assert-min 0.9
+python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 \
+       --decode_iters 8 --skeleton_mode regress --assert-min 0.9
 ```
 
 Requires `torch` (tested on 2.5.1). No custom CUDA kernels — the block-sparse

@@ -137,6 +137,10 @@ def main():
     ap.add_argument("--d_model", type=int, default=96)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--assert-min", type=float, default=None,
+                    help="fail if routed acc < this (regression anchor)")
+    ap.add_argument("--assert-max-activation", type=float, default=0.5,
+                    help="fail if activation ratio exceeds this")
     args = ap.parse_args()
 
     cfg = O1AntiConfig(
@@ -172,6 +176,13 @@ def main():
           f"({'specialized/balanced' if ent > 0.5 * max_ent else 'near-collapse'})")
     print(f"\ngo/no-go: routed acc within a few points of dense at "
           f"{ratio*100:.0f}% activation → compute win is real")
+
+    if args.assert_min is not None:
+        assert r_acc >= args.assert_min, f"routed acc {r_acc:.3f} < {args.assert_min}"
+        assert ratio <= args.assert_max_activation, (
+            f"activation {ratio:.3f} > {args.assert_max_activation}")
+        print(f"\n[assert] routed acc {r_acc:.3f} >= {args.assert_min} and "
+              f"activation {ratio:.3f} <= {args.assert_max_activation}  OK")
 
 
 if __name__ == "__main__":

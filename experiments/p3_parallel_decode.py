@@ -165,6 +165,8 @@ def main():
     ap.add_argument("--decode_iters", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--assert-min", type=float, default=None,
+                    help="fail if end-to-end generated acc < this (regression anchor)")
     args = ap.parse_args()
 
     device = args.device
@@ -235,6 +237,13 @@ def main():
     print(f"  stage 1 ({s1_name}): generated {gen_acc:.3f} vs GT-skeleton ceiling {teach_acc:.3f}")
     print(f"  stage 2 (parallel decoder): {teach_acc:.3f} in {args.decode_iters} "
           f"passes -> {stage2}")
+
+    if args.assert_min is not None:
+        assert gen_acc >= args.assert_min, (
+            f"end-to-end generated acc {gen_acc:.3f} < {args.assert_min}")
+        assert pg_passes < ar_passes, f"parallel passes {pg_passes} !< AR {ar_passes}"
+        print(f"\n[assert] generated acc {gen_acc:.3f} >= {args.assert_min} and "
+              f"{pg_passes} < {ar_passes} passes  OK")
 
 
 if __name__ == "__main__":
