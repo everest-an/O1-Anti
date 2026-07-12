@@ -24,7 +24,15 @@ each. The claim under test: accuracy holds (or nearly holds) as context grows,
 while the cache-size gap (already 8x at P1's toy scale) stays constant or grows
 in O1-Anti's favor as ctx_len increases.
 
-Run:  python experiments/e10_real_needle.py --steps 1000 --lengths 128 256 512
+CAUTION — this task shows threshold/grokking-like convergence within a fixed
+step budget: loss sits on a high plateau, then drops sharply at an unpredictable
+step (observed: sometimes at step ~3000, sometimes never within 4500). A
+single seed can therefore land on either side of that threshold by luck, giving
+a misleading comparison (one early single-seed run showed NLA winning 2 of 3
+lengths by a wide margin but LOSING the third). Use --seeds with 2+ values to
+average this out; a single seed is a preliminary signal only, not a result.
+
+Run:  python experiments/e10_real_needle.py --steps 6000 --lengths 128 256 512 --seeds 0 1
 """
 
 import argparse
@@ -66,6 +74,11 @@ def make_batch(corpus: str, batch: int, ctx_len: int, ans_len: int, gen: torch.G
     key_len = 5
     fact_len = 2 + key_len + 1 + ans_len + 1  # "[K" + key + "]=" + digits (roughly)
     query_len = 2 + key_len + 2               # "[K" + key + "]="
+    min_ctx = query_len + ans_len + 2 * fact_len + 1  # room for both fact and query+value
+    assert ctx_len >= min_ctx, (
+        f"ctx_len={ctx_len} too short to fit a fact + query + value "
+        f"(need >= {min_ctx} for ans_len={ans_len})"
+    )
     seqs = torch.zeros(batch, ctx_len, dtype=torch.long, device=device)
     ans_start = ctx_len - ans_len  # query+value always end-aligned
     for b in range(batch):
@@ -146,8 +159,8 @@ class TinyLM(nn.Module):
 
 
 # ------------------------------------------------------------------- train
-def run(kind, corpus, ctx_len, args, device):
-    torch.manual_seed(args.seed)
+def run(kind, corpus, ctx_len, args, device, seed):
+    torch.manual_seed(seed)
     ans_len = args.ans_len
     cfg = O1AntiConfig(
         vocab_size=VOCAB, d_model=args.d_model, max_seq_len=ctx_len,
@@ -155,7 +168,7 @@ def run(kind, corpus, ctx_len, args, device):
     )
     model = TinyLM(kind, cfg, max_len=ctx_len).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
-    gen = torch.Generator(device=device).manual_seed(args.seed)
+    gen = torch.Generator(device=device).manual_seed(seed)
     t0 = time.time()
     for step in range(args.steps):
         seq, ans_start = make_batch(corpus, args.batch, ctx_len, ans_len, gen, device)
@@ -167,7 +180,7 @@ def run(kind, corpus, ctx_len, args, device):
         loss.backward()
         opt.step()
         if (step + 1) % max(args.steps // 4, 1) == 0:
-            print(f"    [{kind} L={ctx_len}] step {step+1}/{args.steps}  loss {loss.item():.4f}")
+            print(f"    [{kind} L={ctx_len} seed={seed}] step {step+1}/{args.steps}  loss {loss.item():.4f}")
     train_s = time.time() - t0
 
     model.eval()
@@ -184,6 +197,13 @@ def run(kind, corpus, ctx_len, args, device):
             "cache_B_per_tok": cache, "params": sum(p.numel() for p in model.parameters())}
 
 
+def mean_std(vals):
+    n = len(vals)
+    m = sum(vals) / n
+    var = sum((v - m) ** 2 for v in vals) / n
+    return m, var ** 0.5
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=1000)
@@ -193,39 +213,53 @@ def main():
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--d_c", type=int, default=32)
     ap.add_argument("--top_k", type=int, default=16)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seeds", type=int, nargs="+", default=[0],
+                    help="train+eval each (kind, length) once per seed and report mean+std "
+                         "(this task shows threshold-like convergence — single-seed "
+                         "results are noisy; use multiple seeds for a trustworthy signal)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--assert-min", type=float, default=None,
-                    help="fail if NLA exact-match acc < this at ANY length")
+                    help="fail if NLA mean exact-match < this at ANY length")
     args = ap.parse_args()
     device = args.device
 
-    print(f"E10 real-text needle retrieval | device={device} lengths={args.lengths}")
+    print(f"E10 real-text needle retrieval | device={device} lengths={args.lengths} "
+          f"seeds={args.seeds}")
     corpus = load_corpus()
     print(f"corpus: {len(corpus):,} chars")
 
     rows = []
     for L in args.lengths:
         print(f"\n--- context length {L} ---")
-        d = run("dense", corpus, L, args, device)
-        n = run("nla", corpus, L, args, device)
-        rows.append((L, d, n))
+        d_exacts, n_exacts, d_cache, n_cache = [], [], None, None
+        for seed in args.seeds:
+            d = run("dense", corpus, L, args, device, seed)
+            n = run("nla", corpus, L, args, device, seed)
+            d_exacts.append(d["exact"])
+            n_exacts.append(n["exact"])
+            d_cache, n_cache = d["cache_B_per_tok"], n["cache_B_per_tok"]
+            print(f"    seed={seed}: dense={d['exact']:.3f}  nla={n['exact']:.3f}")
+        rows.append((L, d_exacts, n_exacts, d_cache, n_cache))
 
-    print(f"\n{'ctx_len':>8}{'dense exact':>13}{'nla exact':>11}{'dense cache/tok':>17}"
-          f"{'nla cache/tok':>15}{'cache ratio':>13}")
-    for L, d, n in rows:
-        ratio = d["cache_B_per_tok"] / n["cache_B_per_tok"]
-        print(f"{L:>8}{d['exact']:>13.3f}{n['exact']:>11.3f}{d['cache_B_per_tok']:>17}"
-              f"{n['cache_B_per_tok']:>15}{ratio:>12.1f}x")
+    print(f"\n{'ctx_len':>8}{'dense exact (mean±std)':>26}{'nla exact (mean±std)':>24}"
+          f"{'cache ratio':>13}")
+    for L, d_exacts, n_exacts, d_cache, n_cache in rows:
+        dm, ds = mean_std(d_exacts)
+        nm, ns = mean_std(n_exacts)
+        ratio = d_cache / n_cache
+        print(f"{L:>8}{f'{dm:.3f} ± {ds:.3f}':>26}{f'{nm:.3f} ± {ns:.3f}':>24}{ratio:>12.1f}x")
 
-    print("\ngo/no-go: NLA exact-match tracks dense across context lengths while "
+    print(f"\n({len(args.seeds)} seed{'s' if len(args.seeds) > 1 else ''} per cell — "
+          f"this task shows threshold-like convergence within a fixed step budget, "
+          f"so single-seed numbers are noisy; std shown above is the honest spread.)")
+    print("\ngo/no-go: NLA mean exact-match tracks dense across context lengths while "
           "caching a constant multiple less per token — the memory win holds on "
           "real text and does not erode as context grows.")
 
     if args.assert_min is not None:
-        worst = min(n["exact"] for _, _, n in rows)
-        assert worst >= args.assert_min, f"NLA worst exact-match {worst:.3f} < {args.assert_min}"
-        print(f"\n[assert] NLA exact-match >= {args.assert_min} at every length  OK")
+        worst = min(mean_std(n_exacts)[0] for _, _, n_exacts, _, _ in rows)
+        assert worst >= args.assert_min, f"NLA worst mean exact-match {worst:.3f} < {args.assert_min}"
+        print(f"\n[assert] NLA mean exact-match >= {args.assert_min} at every length  OK")
 
 
 if __name__ == "__main__":
