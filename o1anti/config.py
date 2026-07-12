@@ -14,7 +14,12 @@ class O1AntiConfig:
     d_c: int = 32           # compressed per-position state (the only thing cached)
     d_state: int = 64       # liquid global state s_t dimension (m in the spec)
     top_k: int = 8          # neighbors per token
-    nla_route_noise: float = 1.0   # gumbel noise scale on routing scores (train only)
+    # Gumbel exploration noise on the routing scores (train only). Kept at 0:
+    # the straight-through estimator in NeuralLiquidAdjacency.forward already
+    # feeds gradients to non-selected positions, and an ablation (P1) shows any
+    # noise > 0 now DESTROYS learning (0.045 vs 0.995 recall). Left as a knob
+    # only for research; do not enable without re-checking that ablation.
+    nla_route_noise: float = 0.0
 
     # --- pillar 2: Neural Module Graph ---
     n_modules: int = 8      # module library size (M)
