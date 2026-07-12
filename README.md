@@ -41,11 +41,13 @@ Full design and derivations: [`O1ANTI_ARCHITECTURE.md`](O1ANTI_ARCHITECTURE.md).
 The four synthetic go/no-go tests (P1–P4) all pass, and the pillars **compose** in
 one end-to-end model. The first real-text probe (E8) is honest about the limit:
 on generic English LM the trunk trails a matched dense Transformer by ~22%
-bits-per-byte. Two ablations pin the cause down — finer (token-level) routing
-barely helped (+23.9% → +22.1%) and giving NLA full dimension + full density
-helped not at all. The gap is **NLA's single-head mixing operator**, which is
-excellent for sparse retrieval (P1) but under-expressive for generic LM. The
-concrete next lever is a multi-head NLA — see `O1ANTI_ARCHITECTURE.md` § E8.
+bits-per-byte, and **four ablations** (token routing, full-dim/full-K NLA, and
+multi-head NLA) each fail to close it — the gap is robust to every routing/NLA
+knob. The read: O1-Anti's compressed-state, sparse-routed design **trades
+generic-LM quality for its efficiency**, and that trade looks intrinsic at this
+scale. Its strength is where sparse long-range structure dominates (P1, plus the
+real 8× cache saving), not parity with dense attention on broad LM. Full analysis
+in `O1ANTI_ARCHITECTURE.md` § E8.
 
 ### P1 — Neural Liquid Adjacency (memory)
 

@@ -166,39 +166,42 @@ gap is real and consistent throughout training. This contrasts sharply with the
 synthetic tasks (P1–P4), where O1-Anti *matched* dense — so the gap is specific
 to broad language modeling, not a universal deficit.
 
-**We then isolated the cause with two ablations** (byte-level, seq 128, d_model
-128, same protocol):
+**We then tried to close it with four ablations** (byte-level, seq 128, d_model
+128, 1500 steps unless noted, same protocol):
 
-| Variant | Val BPB | vs dense | Note |
+| Variant | Val BPB | vs dense | Lever tested |
 |---|---:|---:|---|
-| Dense Transformer | 2.87 | — | baseline |
-| O1-Anti, **global** routing | 3.56 | +23.9% | one path per window |
-| O1-Anti, **token** MoE routing | 3.51 | +22.1% | per-token FFN experts |
-| O1-Anti, token + **full-dim, full-K NLA** (d_c=128, top_k=128) | 3.70¹ | — | no compression/sparsity |
+| Dense Transformer | **2.87** | — | baseline |
+| O1-Anti, **global** routing | 3.56 | +23.9% | — |
+| O1-Anti, **token** MoE routing | 3.51 | +22.1% | routing granularity |
+| O1-Anti, token + **full-dim, full-K NLA** (d_c=128, top_k=128) | 3.70¹ | — | compression + sparsity |
+| O1-Anti, token + **4-head NLA** | 3.52 | +22.6% | operator head count |
 
-¹ at 1000 steps (vs 3.67 for compressed NLA at the same step) — so removing the
-compression and sparsity did **not** help, despite 30% more params.
+¹ 1000 steps (vs 3.67 for compressed NLA at that step), and it tracked *worse*
+throughout — extra capacity didn't help even discounting undertraining.
 
-**Conclusion — the gap is the NLA operator, not routing or compression.** Finer
-(token-level) routing closed almost none of it (+23.9% → +22.1%), and giving NLA
-full-dimensional, fully-dense aggregation closed none of it either. What remains is
-NLA's mixing formulation itself: a single routing query per position with a single
-value head is a weaker sequence mixer than multi-head softmax attention for
-language modeling — even though it *matched* dense attention on the synthetic
-selective-copy task (P1), which rewards exactly the sparse-retrieval behaviour NLA
-is built for.
+**Conclusion — the gap is robust; none of the obvious levers move it.** Token-level
+routing, full-dimension/full-density NLA, and multi-head NLA each closed
+essentially none of the ~22% gap. (We predicted multi-head would help — it did
+not; reported here rather than buried.) The ~22% deficit vs a matched dense
+Transformer is stable across every routing/NLA knob we varied.
 
-This is the honest, useful result of the probe: NLA's inductive bias is great for
-sparse long-range retrieval (P1) but under-expressive for the dense, local,
-many-relations mixing that generic LM needs. The concrete next lever is a
-**multi-head NLA** (several routing queries + value heads per position), not more
-routing granularity or capacity. The memory win (O(n·d_c) cache) is real and
-orthogonal; the open question is recovering attention-level mixing quality on top
-of it.
+The honest read: O1-Anti's departures from dense attention — values routed through
+a small compressed state, top-K sparse aggregation, liquid gating — **collectively
+trade generic-LM quality for the memory and compute savings**, and that trade
+appears intrinsic to the design at this scale rather than a tunable hyperparameter.
+This is consistent with the pillar results: NLA *matches* dense on synthetic
+sparse-retrieval (P1, its home turf) but lags on the dense, local, many-relations
+mixing generic LM rewards. The architecture's real value proposition is therefore
+**efficiency where sparse long-range structure dominates** (the O(n·d_c) cache and
+sparse compute are genuine and preserved), not parity with dense attention on
+broad language modeling. Closing the LM gap, if possible, needs a change more
+fundamental than the knobs tested here — likely to the value/compression path
+(which is exactly what buys the memory win, so the trade may be irreducible).
 
 Reproduce: `python experiments/train_o1anti.py --steps 1500 --seq 128 --d_model
-128` (global); add `--routing token` (token MoE); add `--d_c 128 --top_k 128`
-(capacity ablation).
+128` (global); add `--routing token`, `--nla_heads 4`, or `--d_c 128 --top_k 128`
+for the ablations.
 
 ## Layout
 
