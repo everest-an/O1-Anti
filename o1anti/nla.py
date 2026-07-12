@@ -85,44 +85,50 @@ class NeuralLiquidAdjacency(nn.Module):
         super().__init__()
         self.cfg = cfg
         d, dc, ds = cfg.d_model, cfg.d_c, cfg.d_state
-        self.compress = nn.Linear(d, dc)            # c_j — the only cached tensor
-        self.key = nn.Linear(dc, dc, bias=False)    # routing key from c_j
-        self.value = nn.Linear(dc, d, bias=False)   # value from c_j
-        self.query = nn.Linear(d + ds, dc)          # routing query from (x_t, s_t)
-        self.gate = nn.Linear(ds, d)                # liquid output gate
+        self.H = cfg.nla_heads
+        self.d_v = d // self.H                       # per-head value dim
+        self.d_k = dc                                # per-head key/query dim
+        self.compress = nn.Linear(d, dc)             # c_j — the only cached tensor
+        self.key = nn.Linear(dc, self.H * self.d_k, bias=False)   # H routing keys from c_j
+        self.value = nn.Linear(dc, d, bias=False)                # H values (concat = d) from c_j
+        self.query = nn.Linear(d + ds, self.H * self.d_k)        # H routing queries from (x_t, s_t)
+        self.gate = nn.Linear(ds, d)                 # liquid output gate
         self.out = nn.Linear(d, d)
         self.state = LiquidStateScan(d, ds)
-        self.scale = 1.0 / math.sqrt(dc)
+        self.scale = 1.0 / math.sqrt(self.d_k)
 
     # ------------------------------------------------------------------ train
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """x: (B, T, d) → (out: (B, T, d), s: (B, T, d_state))."""
+        """x: (B, T, d) → (out: (B, T, d), s: (B, T, d_state)). Multi-head: each
+        head routes to its own top-K neighbours over the shared cached c_j."""
         B, T, _ = x.shape
+        H, dk, dv = self.H, self.d_k, self.d_v
         K = min(self.cfg.top_k, T)
 
         s = self.state(x)                                    # (B, T, ds)
         c = self.compress(x)                                 # (B, T, dc)
-        k = self.key(c)                                      # (B, T, dc)
-        v = self.value(c)                                    # (B, T, d)
-        q = self.query(torch.cat([x, s], dim=-1))            # (B, T, dc)
+        k = self.key(c).view(B, T, H, dk).transpose(1, 2)    # (B, H, T, dk)
+        v = self.value(c).view(B, T, H, dv).transpose(1, 2)  # (B, H, T, dv)
+        q = self.query(torch.cat([x, s], dim=-1)).view(B, T, H, dk).transpose(1, 2)
 
-        scores = torch.einsum("btd,bjd->btj", q, k) * self.scale
+        scores = torch.einsum("bhtd,bhjd->bhtj", q, k) * self.scale   # (B, H, T, T)
         if self.training and self.cfg.nla_route_noise > 0:
             u = torch.rand_like(scores).clamp_min(1e-9)
             scores = scores - self.cfg.nla_route_noise * torch.log(-torch.log(u))
         causal = torch.ones(T, T, dtype=torch.bool, device=x.device).tril()
         scores = scores.masked_fill(~causal, float("-inf"))
 
-        topv, topi = scores.topk(K, dim=-1)                  # (B, T, K)
+        topv, topi = scores.topk(K, dim=-1)                  # (B, H, T, K) — per head
         sparse = torch.full_like(scores, float("-inf")).scatter(-1, topi, topv)
-        alpha = torch.nan_to_num(F.softmax(sparse, dim=-1))  # rows with < K valid slots
+        alpha = torch.nan_to_num(F.softmax(sparse, dim=-1))
         if self.training:
-            # straight-through: execute sparse, but let gradients flow through
-            # the dense softmax so non-selected positions keep a learning signal
+            # straight-through: sparse forward, dense-softmax gradient so
+            # non-selected positions still learn (per head).
             dense = torch.nan_to_num(F.softmax(scores, dim=-1))
             alpha = alpha.detach() + dense - dense.detach()
 
-        agg = torch.einsum("btj,bjd->btd", alpha, v)
+        agg = torch.einsum("bhtj,bhjd->bhtd", alpha, v)      # (B, H, T, dv)
+        agg = agg.transpose(1, 2).reshape(B, T, H * dv)      # (B, T, d)
         out = self.out(agg * torch.sigmoid(self.gate(s)))
         return out, s
 
@@ -136,24 +142,29 @@ class NeuralLiquidAdjacency(nn.Module):
     def step(self, x_t: torch.Tensor, cache: Dict[str, torch.Tensor]) -> torch.Tensor:
         """x_t: (B, d). Mutates cache; returns out_t: (B, d).
 
-        Cache holds c (B, t, d_c) and s (B, d_state) only — no KV pairs.
+        Cache holds c (B, t, d_c) and s (B, d_state) only — no KV pairs, and its
+        size is independent of the head count.
         """
+        B = x_t.shape[0]
+        H, dk, dv = self.H, self.d_k, self.d_v
         s = self.state.step(x_t, cache["s"])
         c_t = self.compress(x_t)
         cache["c"] = torch.cat([cache["c"], c_t.unsqueeze(1)], dim=1)
         cache["s"] = s
 
         c = cache["c"]                                       # (B, t, dc)
-        k = self.key(c)
-        v = self.value(c)
-        q = self.query(torch.cat([x_t, s], dim=-1))          # (B, dc)
+        t = c.shape[1]
+        k = self.key(c).view(B, t, H, dk).transpose(1, 2)    # (B, H, t, dk)
+        v = self.value(c).view(B, t, H, dv).transpose(1, 2)  # (B, H, t, dv)
+        q = self.query(torch.cat([x_t, s], dim=-1)).view(B, H, dk)   # (B, H, dk)
 
-        scores = torch.einsum("bd,bjd->bj", q, k) * self.scale
-        K = min(self.cfg.top_k, c.shape[1])
-        topv, topi = scores.topk(K, dim=-1)
-        alpha = F.softmax(topv, dim=-1)                      # (B, K)
-        v_sel = v.gather(1, topi.unsqueeze(-1).expand(-1, -1, v.shape[-1]))
-        agg = (alpha.unsqueeze(-1) * v_sel).sum(dim=1)       # (B, d)
+        scores = torch.einsum("bhd,bhjd->bhj", q, k) * self.scale    # (B, H, t)
+        K = min(self.cfg.top_k, t)
+        topv, topi = scores.topk(K, dim=-1)                  # (B, H, K)
+        alpha = F.softmax(topv, dim=-1)                      # (B, H, K)
+        v_sel = torch.gather(v, 2, topi.unsqueeze(-1).expand(-1, -1, -1, dv))  # (B,H,K,dv)
+        agg = (alpha.unsqueeze(-1) * v_sel).sum(dim=2)       # (B, H, dv)
+        agg = agg.reshape(B, H * dv)                         # (B, d)
         return self.out(agg * torch.sigmoid(self.gate(s)))
 
     @staticmethod

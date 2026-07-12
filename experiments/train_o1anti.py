@@ -154,10 +154,12 @@ def main():
     ap.add_argument("--n_modules", type=int, default=6)
     ap.add_argument("--path_len", type=int, default=3)
     ap.add_argument("--top_k", type=int, default=16)
+    ap.add_argument("--d_c", type=int, default=0, help="NLA compressed-state dim (0 = d_model//4)")
     ap.add_argument("--routing", choices=["global", "token"], default="global",
                     help="global = one path per input; token = per-token MoE-FFN")
     ap.add_argument("--n_layers", type=int, default=3, help="trunk depth for token routing")
     ap.add_argument("--moe_top_e", type=int, default=1, help="experts per token (token routing)")
+    ap.add_argument("--nla_heads", type=int, default=1, help="NLA routing/value heads")
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -177,9 +179,10 @@ def main():
     cfg = O1AntiConfig(
         vocab_size=VOCAB, d_model=args.d_model, max_seq_len=args.seq,
         n_modules=args.n_modules, path_len=args.path_len, top_k=args.top_k,
-        d_ff=4 * args.d_model, d_c=args.d_model // 4, d_state=args.d_model // 2,
+        d_ff=4 * args.d_model, d_c=args.d_c or args.d_model // 4, d_state=args.d_model // 2,
         d_ctx=args.d_model, skeleton_mode="regress",
         routing_granularity=args.routing, n_layers=args.n_layers, moe_top_e=args.moe_top_e,
+        nla_heads=args.nla_heads,
     )
     o1 = O1AntiModel(cfg).to(device)
     o1_active = lm_active_params(o1, cfg)

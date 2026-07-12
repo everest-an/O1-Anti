@@ -14,6 +14,10 @@ class O1AntiConfig:
     d_c: int = 32           # compressed per-position state (the only thing cached)
     d_state: int = 64       # liquid global state s_t dimension (m in the spec)
     top_k: int = 8          # neighbors per token
+    nla_heads: int = 1      # NLA routing/value heads. Cache stays O(n·d_c) (keys
+                            # and values are projected per-head from the shared
+                            # cached c_j), but H heads give attention-style
+                            # multi-relation mixing. d_model must be divisible by H.
     # Gumbel exploration noise on the routing scores (train only). Kept at 0:
     # the straight-through estimator in NeuralLiquidAdjacency.forward already
     # feeds gradients to non-selected positions, and an ablation (P1) shows any
@@ -70,3 +74,4 @@ class O1AntiConfig:
         assert self.d_model % 2 == 0, "d_model must be even (time embedding)"
         assert self.top_k >= 1
         assert self.path_len <= self.n_modules or self.n_modules > 0
+        assert self.d_model % self.nla_heads == 0, "d_model must divide nla_heads"

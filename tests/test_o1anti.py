@@ -67,6 +67,31 @@ def test_nla_cache_smaller_than_kv():
     assert NeuralLiquidAdjacency.cache_bytes_per_token(CFG) * 4 <= kv_bytes
 
 
+def test_multihead_nla_consistency_and_causality():
+    """Multi-head NLA: step() must match the parallel forward, stay causal, and
+    keep the cache size independent of head count."""
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, nla_heads=4, d_model=32)
+    torch.manual_seed(0)
+    nla = NeuralLiquidAdjacency(cfg).eval()
+    x = torch.randn(2, 14, cfg.d_model)
+    with torch.no_grad():
+        out_par, _ = nla(x)
+        # causality: perturbing the future must not change past outputs
+        x2 = x.clone()
+        x2[:, 10:] += 5.0
+        out2, _ = nla(x2)
+        assert torch.allclose(out_par[:, :10], out2[:, :10], atol=1e-5)
+        # step == parallel
+        cache = nla.init_cache(2)
+        for t in range(14):
+            out_t = nla.step(x[:, t], cache)
+            assert torch.allclose(out_par[:, t], out_t, atol=1e-4), f"t={t}"
+    # cache is c_j only — unchanged by head count
+    assert cache["c"].shape == (2, 14, cfg.d_c)
+
+
 def test_router_one_hot_and_dispatch():
     torch.manual_seed(0)
     model = O1AntiModel(CFG).eval()
