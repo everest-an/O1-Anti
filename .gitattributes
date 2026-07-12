@@ -1,0 +1,20 @@
+# Normalize line endings so committing from Windows stops warning about
+# "LF will be replaced by CRLF". Text files are stored LF in the repo.
+* text=auto eol=lf
+
+# Explicit: source and docs are always LF.
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.tex  text eol=lf
+*.sh   text eol=lf
+
+# Binary assets — never touch.
+*.png  binary
+*.pdf  binary
+*.pptx binary
+*.docx binary
+*.otf  binary
+*.zip  binary
+*.safetensors binary

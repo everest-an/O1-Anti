@@ -70,7 +70,16 @@ class LiquidStateScan(nn.Module):
 
 
 class NeuralLiquidAdjacency(nn.Module):
-    """Top-K dynamic sparse aggregation over compressed position states."""
+    """Top-K dynamic sparse aggregation over compressed position states.
+
+    Scope note: the win here is the *inference cache* — O(n·d_c) compressed
+    states instead of an O(n·d_model) KV cache (see cache_bytes_per_token).
+    Training-time compute is still O(n²): forward() materializes the full
+    (T, T) score matrix densely before the top-K. A block-sparse gather/scatter
+    kernel to make training sub-quadratic is on the roadmap, not implemented
+    here — so at prototype scale NLA trains slower than dense attention even
+    though it caches far less at inference.
+    """
 
     def __init__(self, cfg: O1AntiConfig):
         super().__init__()

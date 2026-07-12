@@ -1,0 +1,6 @@
+# Minimal dependencies for the o1anti package + experiments + tests.
+# The o1anti code imports only torch; numpy/pytest are for the harnesses/tests.
+# (The repo-wide requirements.txt covers the separate MT-LNN assets.)
+torch>=2.0.0
+numpy>=1.24.0
+pytest>=7.0.0

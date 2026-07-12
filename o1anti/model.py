@@ -6,8 +6,13 @@ Understanding path (also the causal LM used for pretraining):
            → norm → tied LM head
 
 Generation path (two-stage, non-autoregressive):
-    prompt → trunk → ctx → SkeletonGenerator (few-step ODE from noise)
-           → ParallelDecoder (mask-predict, fixed rounds) → tokens
+    prompt → embed → stage-1 skeleton generator → ParallelDecoder
+           → (mask-predict, fixed rounds) → tokens
+
+    Stage-1 generator depends on cfg.skeleton_mode:
+      "regress"  (default) — SkeletonPrior regresses prompt→skeleton, 1 pass.
+      "flow"               — SkeletonGenerator flow-matching ODE, ode_steps.
+      "discrete"           — VectorQuantizer codes + SkeletonPrior, 1 pass.
 """
 
 from dataclasses import dataclass
@@ -89,10 +94,14 @@ class O1AntiModel(nn.Module):
     def generation_loss(self, prompt_ids: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
         """Stage-1 skeleton generation + stage-2 masked parallel decoding.
 
-        discrete mode (default): encoder → VQ codes; a parallel prior predicts
-        the codes from the prompt (cross-entropy); decoder reconstructs from the
-        quantized skeleton. Stage 1 is 1 parallel classification pass.
-        flow mode: flow-matching a continuous latent skeleton.
+        The stage-1 term depends on cfg.skeleton_mode:
+          "regress"  (default): SkeletonEncoder makes a target skeleton; the
+                     prior regresses prompt→skeleton (MSE); the decoder trains on
+                     a noise-perturbed skeleton so it tolerates regression error.
+          "discrete": encoder → VQ codes; the prior predicts codes from the
+                     prompt (cross-entropy); decoder reconstructs from the codes.
+          "flow":    flow-matching a continuous latent skeleton from noise.
+        Stage-2 is always CMLM cross-entropy over the masked positions.
         """
         mem = self.embed(prompt_ids)                     # prompt memory (B,T,d)
         h_t = self.embed(target_ids)
