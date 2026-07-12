@@ -36,14 +36,16 @@ Full design and derivations: [`O1ANTI_ARCHITECTURE.md`](O1ANTI_ARCHITECTURE.md).
 | **P2** compute | Routed graph vs dense stack (regime classification) | 100% acc at **27% activation**, balanced module usage | **GO** |
 | **P3** latency | Parallel decode vs autoregressive (len-48 reconstruction) | AR-equal 1.000 in **14 passes vs 48** (3.4× fewer) | **GO** |
 | **P4** integration | All three pillars in one trained model | 1.000 generated at **74% activation, 7 passes vs 48** | **GO** |
-| **E8** real text | Byte-level LM on WikiText-2 vs matched dense | **+24% BPB behind** dense (3.56 vs 2.87) | **GAP** |
+| **E8** real text | Byte-level LM on WikiText-2 vs matched dense | **+22% BPB behind** dense (3.51 vs 2.87) | **GAP** |
 
 The four synthetic go/no-go tests (P1–P4) all pass, and the pillars **compose** in
 one end-to-end model. The first real-text probe (E8) is honest about the limit:
-on generic English LM the compressed/sparse trunk trails a matched dense
-Transformer by ~24% bits-per-byte. The mechanisms are sound; making them
-competitive on broad language modeling (finer-grained routing, richer NLA) is the
-open work — see `O1ANTI_ARCHITECTURE.md` § E8.
+on generic English LM the trunk trails a matched dense Transformer by ~22%
+bits-per-byte. Two ablations pin the cause down — finer (token-level) routing
+barely helped (+23.9% → +22.1%) and giving NLA full dimension + full density
+helped not at all. The gap is **NLA's single-head mixing operator**, which is
+excellent for sparse retrieval (P1) but under-expressive for generic LM. The
+concrete next lever is a multi-head NLA — see `O1ANTI_ARCHITECTURE.md` § E8.
 
 ### P1 — Neural Liquid Adjacency (memory)
 

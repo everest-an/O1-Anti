@@ -166,18 +166,39 @@ gap is real and consistent throughout training. This contrasts sharply with the
 synthetic tasks (P1–P4), where O1-Anti *matched* dense — so the gap is specific
 to broad language modeling, not a universal deficit.
 
-Likely causes, in rough priority: (1) one routed module path per whole 128-token
-window is too coarse for LM — token-level or chunk-level routing would give the
-compute where it's needed; (2) top-K=16 sparse aggregation over d_c=32 compressed
-states loses information that full attention keeps; (3) only 3 of 6 modules active
-is less effective capacity than 3 dense layers. Also note O1-Anti trains ~2.3×
-slower (the documented O(n²) NLA training cost), so a *wall-clock*-matched
-comparison would widen the gap further.
+**We then isolated the cause with two ablations** (byte-level, seq 128, d_model
+128, same protocol):
 
-This is the value of the probe: the pillars are individually sound, but composing
-them for real LM needs finer-grained routing and/or richer NLA before the
-architecture is competitive on generic text. Reproduce:
-`python experiments/train_o1anti.py --steps 1500 --seq 128 --d_model 128`.
+| Variant | Val BPB | vs dense | Note |
+|---|---:|---:|---|
+| Dense Transformer | 2.87 | — | baseline |
+| O1-Anti, **global** routing | 3.56 | +23.9% | one path per window |
+| O1-Anti, **token** MoE routing | 3.51 | +22.1% | per-token FFN experts |
+| O1-Anti, token + **full-dim, full-K NLA** (d_c=128, top_k=128) | 3.70¹ | — | no compression/sparsity |
+
+¹ at 1000 steps (vs 3.67 for compressed NLA at the same step) — so removing the
+compression and sparsity did **not** help, despite 30% more params.
+
+**Conclusion — the gap is the NLA operator, not routing or compression.** Finer
+(token-level) routing closed almost none of it (+23.9% → +22.1%), and giving NLA
+full-dimensional, fully-dense aggregation closed none of it either. What remains is
+NLA's mixing formulation itself: a single routing query per position with a single
+value head is a weaker sequence mixer than multi-head softmax attention for
+language modeling — even though it *matched* dense attention on the synthetic
+selective-copy task (P1), which rewards exactly the sparse-retrieval behaviour NLA
+is built for.
+
+This is the honest, useful result of the probe: NLA's inductive bias is great for
+sparse long-range retrieval (P1) but under-expressive for the dense, local,
+many-relations mixing that generic LM needs. The concrete next lever is a
+**multi-head NLA** (several routing queries + value heads per position), not more
+routing granularity or capacity. The memory win (O(n·d_c) cache) is real and
+orthogonal; the open question is recovering attention-level mixing quality on top
+of it.
+
+Reproduce: `python experiments/train_o1anti.py --steps 1500 --seq 128 --d_model
+128` (global); add `--routing token` (token MoE); add `--d_c 128 --top_k 128`
+(capacity ablation).
 
 ## Layout
 
