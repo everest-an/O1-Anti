@@ -144,6 +144,41 @@ where autoregression needs 48. `test_generation_routes_through_module_trunk` loc
 in that the module library and router receive gradient during a pure generation
 step. Reproduce: `python experiments/p4_integrated.py --steps 2000 --length 48`.
 
+### E8 — Real-text language modeling (first non-synthetic evidence)
+
+P1–P4 run on synthetic tasks. E8 is the first real-text check: byte-level causal
+language modeling on WikiText-2, comparing the O1-Anti trunk (context-routed NLA
+modules) against a dense Transformer **matched to O1-Anti's active LM params**
+(generation stack excluded, tied weights deduped, only `path_len` modules
+counted), reported as validation bits-per-byte (BPB).
+
+WikiText-2, byte-level, seq 128, d_model 128, 1500 steps, CPU (10.9M train bytes):
+
+| Model | Val bits/byte | Active params | Train wall-clock |
+|---|---:|---:|---:|
+| Dense Transformer (3 layers) | **2.87** | 644K | 190 s |
+| **O1-Anti trunk** (NLA + 3/6 modules) | 3.56 | 603K | 439 s |
+
+**Gap, not GO — the honest finding.** At matched active params the O1-Anti trunk
+lands **+23.9% BPB behind** a dense Transformer on generic English LM. Both are
+still improving at step 1500 (dense faster), so neither is converged, but the
+gap is real and consistent throughout training. This contrasts sharply with the
+synthetic tasks (P1–P4), where O1-Anti *matched* dense — so the gap is specific
+to broad language modeling, not a universal deficit.
+
+Likely causes, in rough priority: (1) one routed module path per whole 128-token
+window is too coarse for LM — token-level or chunk-level routing would give the
+compute where it's needed; (2) top-K=16 sparse aggregation over d_c=32 compressed
+states loses information that full attention keeps; (3) only 3 of 6 modules active
+is less effective capacity than 3 dense layers. Also note O1-Anti trains ~2.3×
+slower (the documented O(n²) NLA training cost), so a *wall-clock*-matched
+comparison would widen the gap further.
+
+This is the value of the probe: the pillars are individually sound, but composing
+them for real LM needs finer-grained routing and/or richer NLA before the
+architecture is competitive on generic text. Reproduce:
+`python experiments/train_o1anti.py --steps 1500 --seq 128 --d_model 128`.
+
 ## Layout
 
 ```
@@ -159,6 +194,7 @@ experiments/
   p2_module_routing.py  # P2 — routed graph vs dense stack
   p3_parallel_decode.py # P3 — parallel decode vs autoregressive
   p4_integrated.py      # P4 — all three pillars in one model
+  train_o1anti.py       # E8 — real-text byte-level LM, BPB vs dense
 tests/
   test_o1anti.py   # 14 tests: shapes, causality, consistency, all modes, P4
 ```
