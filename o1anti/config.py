@@ -50,12 +50,16 @@ class O1AntiConfig:
     n_layers: int = 4       # trunk depth for token-MoE routing
     moe_top_e: int = 1      # experts activated per token (top-e)
     # Noisy top-k gating (Shazeer et al. 2017). Train-only Gaussian noise on the
-    # gate logits before top-e selection, std = moe_noise / n_modules. Improves
-    # load balancing and resists expert collapse (a dead expert never runs, so
-    # only the load-balance loss can resurrect it — noise lets it occasionally
-    # win a token and get a real gradient). 0 = plain Switch-style gating.
-    # Default 0 keeps the validated E8 token-routing runs exact; treat >0 as the
-    # recommended hardening for longer/larger training.
+    # gate logits before top-e selection, std = moe_noise / n_modules — a
+    # standard defense against expert collapse (a dead expert never runs, so only
+    # the load-balance loss can resurrect it; noise lets it occasionally win a
+    # token and get a real gradient). Combine weights + load-balance usage still
+    # come from the clean softmax, so it's unbiased and eval is deterministic.
+    # EMPIRICAL NOTE: at prototype scale the plain gating (moe_noise=0) already
+    # keeps all experts balanced — a collapse diagnostic showed 8/8 experts
+    # active at MAX entropy with noise both OFF and ON (the load_balance_coef
+    # penalty suffices). So this is available hardening for larger/harder runs,
+    # NOT a fix for an observed collapse. Default 0 (exact, matches validated E8).
     moe_noise: float = 0.0
 
     # --- pillar 3: liquid state-transition generation ---
