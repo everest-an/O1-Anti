@@ -49,6 +49,15 @@ class O1AntiConfig:
     routing_granularity: str = "global"
     n_layers: int = 4       # trunk depth for token-MoE routing
     moe_top_e: int = 1      # experts activated per token (top-e)
+    # Hybrid trunk (token routing only). 0 = every layer mixes with NLA (default,
+    # matches validated results). N>0 = every N-th layer (i where (i+1)%N==0) uses
+    # FULL causal attention instead of NLA, the rest use NLA — the Jamba/Zamba
+    # "interleave attention with a cheap mixer" pattern. Motivation: E8 showed
+    # all-NLA trades ~22% LM quality vs dense and 4 ablations couldn't close it;
+    # a few full-attention layers restore the dense many-relations mixing while
+    # NLA layers keep the cheap long-range path. Attention layers cache full KV
+    # (the memory win applies only to the NLA layers).
+    hybrid_attn_every: int = 0
     # Noisy top-k gating (Shazeer et al. 2017). Train-only Gaussian noise on the
     # gate logits before top-e selection, std = moe_noise / n_modules — a
     # standard defense against expert collapse (a dead expert never runs, so only

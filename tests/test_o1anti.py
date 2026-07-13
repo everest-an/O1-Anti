@@ -258,6 +258,31 @@ def test_moe_noisy_gating_unbiased_and_eval_deterministic():
     assert got >= 2
 
 
+def test_hybrid_trunk_interleaves_attention_and_stays_causal():
+    """Hybrid token trunk: cfg.hybrid_attn_every>0 replaces every N-th NLA mixer
+    with full causal attention. Must build with the right mix, train, and keep
+    the whole trunk causal (attention layers included)."""
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, routing_granularity="token", n_layers=4,
+                              hybrid_attn_every=2)
+    torch.manual_seed(0)
+    model = O1AntiModel(cfg)
+    kinds = [b.mixer_kind for b in model.trunk.blocks]
+    assert kinds == ["nla", "attn", "nla", "attn"], kinds
+    # causal: perturbing the future leaves past hidden states unchanged
+    model.eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, 20))
+    with torch.no_grad():
+        h1 = model.encode(ids)[0]
+        ids2 = ids.clone(); ids2[:, 15:] = torch.randint(0, cfg.vocab_size, (1, 5))
+        h2 = model.encode(ids2)[0]
+    assert torch.allclose(h1[:, :15], h2[:, :15], atol=1e-4), "hybrid trunk broke causality"
+    # trains
+    model.train()
+    model(ids, labels=ids).loss.backward()
+
+
 def test_token_moe_causality():
     import dataclasses
 

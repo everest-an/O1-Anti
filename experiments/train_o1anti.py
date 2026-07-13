@@ -176,6 +176,8 @@ def main():
                     help="global = one path per input; token = per-token MoE-FFN")
     ap.add_argument("--n_layers", type=int, default=3, help="trunk depth for token routing")
     ap.add_argument("--moe_top_e", type=int, default=1, help="experts per token (token routing)")
+    ap.add_argument("--hybrid_attn_every", type=int, default=0,
+                    help="token routing: every N-th layer uses full attention (0=all NLA)")
     ap.add_argument("--nla_heads", type=int, default=1, help="NLA routing/value heads")
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--seed", type=int, default=0)
@@ -199,11 +201,12 @@ def main():
         d_ff=4 * args.d_model, d_c=args.d_c or args.d_model // 4, d_state=args.d_model // 2,
         d_ctx=args.d_model, skeleton_mode="regress",
         routing_granularity=args.routing, n_layers=args.n_layers, moe_top_e=args.moe_top_e,
-        nla_heads=args.nla_heads,
+        nla_heads=args.nla_heads, hybrid_attn_every=args.hybrid_attn_every,
     )
     o1 = O1AntiModel(cfg).to(device)
     o1_active = lm_active_params(o1, cfg)
-    routing_desc = (f"token MoE {args.moe_top_e}/{args.n_modules} experts × {args.n_layers} layers"
+    _hyb = (f", hybrid attn every {args.hybrid_attn_every}" if args.hybrid_attn_every else "")
+    routing_desc = (f"token MoE {args.moe_top_e}/{args.n_modules} experts × {args.n_layers} layers{_hyb}"
                     if args.routing == "token" else
                     f"global path {args.path_len}/{args.n_modules} modules")
     print(f"\n[O1-Anti] active LM params ~{o1_active:,} ({routing_desc}; gen stack excluded)")

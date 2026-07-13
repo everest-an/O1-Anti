@@ -183,37 +183,61 @@ class MoEFeedForward(nn.Module):
 
 
 class MoEBlock(nn.Module):
-    """Dense NLA (pillar 1) + per-token routed MoE-FFN (pillar 2)."""
+    """One token-trunk block: a sequence mixer + a per-token routed MoE-FFN.
 
-    def __init__(self, cfg: O1AntiConfig):
+    mixer="nla" (default) uses Neural Liquid Adjacency (pillar 1, cheap
+    long-range, O(n·d_c) cache). mixer="attn" uses full causal multi-head
+    attention (dense many-relations mixing, full KV cache) — hybrid trunks
+    interleave the two (Jamba/Zamba pattern). Attention layers return s=None so
+    the trunk skips them in the liquid state-continuity penalty."""
+
+    def __init__(self, cfg: O1AntiConfig, mixer: str = "nla"):
         super().__init__()
+        self.mixer_kind = mixer
         self.norm1 = nn.LayerNorm(cfg.d_model)
-        self.nla = NeuralLiquidAdjacency(cfg)
+        if mixer == "attn":
+            self.attn = nn.MultiheadAttention(cfg.d_model, cfg.nla_heads, batch_first=True)
+        else:
+            self.nla = NeuralLiquidAdjacency(cfg)
         self.norm2 = nn.LayerNorm(cfg.d_model)
         self.moe = MoEFeedForward(cfg)
 
     def forward(self, h: torch.Tensor):
-        mixed, s = self.nla(self.norm1(h))
+        x = self.norm1(h)
+        if self.mixer_kind == "attn":
+            mask = nn.Transformer.generate_square_subsequent_mask(h.shape[1], device=h.device)
+            mixed = self.attn(x, x, x, attn_mask=mask, need_weights=False)[0]
+            s = None
+        else:
+            mixed, s = self.nla(x)
         h = h + mixed
         ffn, usage = self.moe(self.norm2(h))
         return h + ffn, s, usage
 
 
 class TokenMoETrunk(nn.Module):
-    """Stack of MoE blocks — the fine-grained-routing trunk for language modeling."""
+    """Stack of MoE blocks — the fine-grained-routing trunk for language
+    modeling. With cfg.hybrid_attn_every > 0, every N-th block mixes with full
+    attention instead of NLA (hybrid), the rest use NLA."""
 
     def __init__(self, cfg: O1AntiConfig):
         super().__init__()
         self.cfg = cfg
-        self.blocks = nn.ModuleList(MoEBlock(cfg) for _ in range(cfg.n_layers))
+        blocks = []
+        for i in range(cfg.n_layers):
+            is_attn = cfg.hybrid_attn_every > 0 and (i + 1) % cfg.hybrid_attn_every == 0
+            blocks.append(MoEBlock(cfg, mixer="attn" if is_attn else "nla"))
+        self.blocks = nn.ModuleList(blocks)
 
     def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """h: (B, T, d) → (h_out, usage (E,) averaged over layers, continuity)."""
         usage = h.new_zeros(self.cfg.n_modules)
         cont = h.new_zeros(())
+        n_nla = 0
         for blk in self.blocks:
             h, s, u = blk(h)
             usage = usage + u
-            cont = cont + state_continuity_loss(s)
-        n = len(self.blocks)
-        return h, usage / n, cont / n
+            if s is not None:                    # attention layers have no liquid state
+                cont = cont + state_continuity_loss(s)
+                n_nla += 1
+        return h, usage / len(self.blocks), cont / max(n_nla, 1)
