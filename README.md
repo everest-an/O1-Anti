@@ -37,7 +37,7 @@ Full design and derivations: [`O1ANTI_ARCHITECTURE.md`](O1ANTI_ARCHITECTURE.md).
 | **P3** latency | Parallel decode vs autoregressive (len-48 reconstruction) | AR-equal 1.000 in **14 passes vs 48** (3.4× fewer) | **GO** |
 | **P4** integration | All three pillars in one trained model | 1.000 generated at **74% activation, 7 passes vs 48** | **GO** |
 | **E8** real text | Byte-level LM on WikiText-2 vs matched dense | **+22% BPB behind** dense (3.51 vs 2.87) | **GAP** |
-| **E10** real text | Needle retrieval in real WikiText, 2 seeds/length | NLA **0.75–0.84 vs dense 0.03–0.27** at 2 of 3 lengths, 6× cache | **GO*** |
+| **E10** real text | Needle retrieval in real WikiText, 2 seeds/length | NLA **0.75–0.84 vs dense 0.03–0.27** at L=128/512 (both seeds), 6× cache; L=256 bimodal | **GO*** |
 
 The four synthetic go/no-go tests (P1–P4) all pass, and the pillars **compose** in
 one end-to-end model. The two real-text probes tell opposite, and complementary,
@@ -46,9 +46,11 @@ trails a matched dense Transformer by ~22% bits-per-byte, and four ablations
 (token routing, full-dim/full-K NLA, multi-head NLA) each fail to close it, so
 the gap looks intrinsic to the design at this scale. **E10** is the other side —
 on sparse content-addressed retrieval embedded in real text, NLA beats dense by
-a wide margin, reproducibly across 2 independent seeds, at 2 of 3 context lengths
-(the third is inconclusive — neither model converges there within budget, not a
-counter-example). The read: O1-Anti's compressed-state, sparse-routed design
+a wide margin, reproducibly across 2 independent seeds, at L=128 and L=512. At
+L=256 its optimization is bimodal — one seed groks to 0.85, the other stalls at
+0.03 even at 12000 steps — so its *ceiling* clearly beats dense there too, but
+whether it converges within budget is seed-dependent (reported honestly, not
+cherry-picked). The read: O1-Anti's compressed-state, sparse-routed design
 **trades generic-LM quality for efficiency on sparse long-range retrieval** —
 exactly the workload its inductive bias targets — while paying a real cost on
 dense, generic language modeling. Full analysis in `O1ANTI_ARCHITECTURE.md`

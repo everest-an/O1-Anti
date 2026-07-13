@@ -247,26 +247,35 @@ lost at the third — and was NOT reported as a result; it was reported as
 version). Rerun with 2 seeds per cell, 6000 steps (the budget that reliably
 converges in this regime), batch 24, d_model 96:
 
-| ctx_len | dense exact (mean ± std) | NLA exact (mean ± std) | cache ratio |
-|---:|---:|---:|---:|
-| 128 | 0.265 ± 0.040 | **0.748 ± 0.192** | 6.0× |
-| 256 | 0.117 ± 0.042 | 0.073 ± 0.043 | 6.0× |
-| 512 | 0.035 ± 0.005 | **0.837 ± 0.123** | 6.0× |
+| ctx_len | steps | dense exact (mean ± std) | NLA exact (mean ± std) | cache ratio |
+|---:|---:|---:|---:|---:|
+| 128 | 6000 | 0.265 ± 0.040 | **0.748 ± 0.192** | 6.0× |
+| 256 | 6000 | 0.117 ± 0.042 | 0.073 ± 0.043 | 6.0× |
+| 256 | 12000 | 0.172 ± 0.022 | 0.438 ± **0.413** | 6.0× |
+| 512 | 6000 | 0.035 ± 0.005 | **0.837 ± 0.123** | 6.0× |
 
-**Go, with an honest caveat.** At the two lengths where both models actually
-converge within the step budget (128 and 512), NLA beats dense by a wide margin
-**in both seeds independently** — not single-seed luck — while caching 6× less
-per token. At L=256, *neither* model converges well within budget (both near a
-low floor); this is shared undertraining at that specific length, not evidence
-that NLA underperforms there specifically — reported as inconclusive rather than
-silently dropped or treated as a counter-example.
+**Go at L=128 and L=512; L=256 is bimodal (grok-or-not).** At the two lengths
+where NLA reliably crosses its convergence threshold, it beats dense by a wide
+margin **in both seeds independently** — not single-seed luck — while caching 6×
+less per token. L=256 is the honest asterisk: at 6000 steps NLA looked simply
+undertrained (0.073); extending to 12000 steps let **one** seed grok
+spectacularly (0.850, loss dropping at step ~9000) while the **other** never
+crossed the threshold (0.025) — hence the huge ±0.413 spread. So at L=256 NLA's
+*ceiling* clearly exceeds dense (0.85 vs 0.15–0.20), but whether it groks within
+budget is seed-dependent and unreliable; more seeds would be needed to estimate
+the grok probability. We report this rather than cherry-picking the 0.850 seed.
+
+Dense, by contrast, plateaus at ~0.15–0.20 across L=256 regardless of budget
+(loss flat from step 3000 to 12000) — it isn't grokking-limited, it just tops
+out lower.
 
 This result and E8 are not in tension: E8 stresses NLA's weak spot (dense,
 many-relations LM mixing); E10 stresses its strength (sparse, content-addressed
-retrieval). Together they say plainly where the architecture wins and where it
-doesn't, rather than claiming a universal win. Reproduce: `python
-experiments/e10_real_needle.py --steps 6000 --lengths 128 256 512 --ans_len 2
---batch 24 --d_model 96 --seeds 0 1`.
+retrieval), where its ceiling is far higher than dense — though at some lengths
+its optimization is a threshold/grokking process that a fixed CPU-scale budget
+doesn't always reach. Reproduce: `python experiments/e10_real_needle.py --steps
+6000 --lengths 128 256 512 --ans_len 2 --batch 24 --d_model 96 --seeds 0 1`
+(add `--steps 12000 --lengths 256` for the extended L=256 probe).
 
 ## Layout
 
