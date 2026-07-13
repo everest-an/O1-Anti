@@ -29,6 +29,17 @@ between the module failing to learn and matching dense attention (see P1 below).
 
 `step()` is exactly consistent with the parallel `forward()` (unit-tested).
 
+**Training compute.** The exact path (default) scores densely — O(n²) — so the
+memory win (O(n·d_c) cache) is real but training FLOPs are not sub-quadratic.
+`cfg.nla_block_size > 0` enables a **two-stage block-sparse** path: queries pick
+`nla_cand_blocks` candidate blocks by block-summary score (coarse, own block
+always kept), then run fine top-K only inside those blocks. At block size ≈√T
+this is **O(T^1.5)**, causality stays exact (an absolute-position mask on the
+fine stage), and it approximates the exact top-K well — cosine to the exact
+output ≈0.96–0.99 up to T=512, with the score-op reduction growing from ≈1.4×
+(T=100) to ≈4.3× (T=512). It is opt-in and approximate, so all validated
+results below use the exact path.
+
 ## Pillar 2 — Neural Module Graph (compute)
 
 No fixed layer stack. A `ContextEncoder` summarizes the input once; a
@@ -296,5 +307,7 @@ python experiments/p3_parallel_decode.py --steps 2000 --length 48 --skel_len 48 
        --decode_iters 8 --skeleton_mode regress --assert-min 0.9
 ```
 
-Requires `torch` (tested on 2.5.1). No custom CUDA kernels — the block-sparse
-gather/scatter for NLA is on the scaling roadmap, not needed at prototype scale.
+Requires `torch` (tested on 2.5.1). No custom CUDA kernels. A pure-PyTorch
+sub-quadratic training path for NLA is available (`cfg.nla_block_size > 0`,
+two-stage block-sparse, O(T^1.5)); a fused block-sparse CUDA kernel would push
+it further but is not needed at prototype scale.

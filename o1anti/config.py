@@ -18,6 +18,14 @@ class O1AntiConfig:
                             # and values are projected per-head from the shared
                             # cached c_j), but H heads give attention-style
                             # multi-relation mixing. d_model must be divisible by H.
+    # Sub-quadratic training path (block-sparse two-stage top-K). 0 = exact dense
+    # O(T²) scoring (default, matches all validated results). >0 = block size:
+    # queries first pick nla_cand_blocks candidate blocks by block-summary score
+    # (O(T·T/bs)), then do fine top-K only within those blocks (O(T·cand·bs)).
+    # With bs≈√T this is O(T^1.5). Approximate — the picked neighbours can differ
+    # from the exact top-K, so it is an inference/training-speed lever, opt-in.
+    nla_block_size: int = 0
+    nla_cand_blocks: int = 4    # candidate blocks kept per query (own block always in)
     # Gumbel exploration noise on the routing scores (train only). Kept at 0:
     # the straight-through estimator in NeuralLiquidAdjacency.forward already
     # feeds gradients to non-selected positions, and an ablation (P1) shows any
@@ -41,6 +49,14 @@ class O1AntiConfig:
     routing_granularity: str = "global"
     n_layers: int = 4       # trunk depth for token-MoE routing
     moe_top_e: int = 1      # experts activated per token (top-e)
+    # Noisy top-k gating (Shazeer et al. 2017). Train-only Gaussian noise on the
+    # gate logits before top-e selection, std = moe_noise / n_modules. Improves
+    # load balancing and resists expert collapse (a dead expert never runs, so
+    # only the load-balance loss can resurrect it — noise lets it occasionally
+    # win a token and get a real gradient). 0 = plain Switch-style gating.
+    # Default 0 keeps the validated E8 token-routing runs exact; treat >0 as the
+    # recommended hardening for longer/larger training.
+    moe_noise: float = 0.0
 
     # --- pillar 3: liquid state-transition generation ---
     skel_len: int = 16      # semantic skeleton length (L_skel)

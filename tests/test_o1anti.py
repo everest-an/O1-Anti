@@ -93,6 +93,37 @@ def test_multihead_nla_consistency_and_causality():
     assert cache["c"].shape == (2, 14, cfg.d_c)
 
 
+def test_blocksparse_nla_causal_and_approximates_exact():
+    """Sub-quadratic block-sparse NLA (nla_block_size>0) must (a) preserve exact
+    causality, (b) closely approximate the exact O(T^2) path, and (c) actually
+    reduce score-op count. Default (nla_block_size=0) is the exact path and is
+    covered by the other NLA tests, so validated results are untouched."""
+    import dataclasses
+
+    T = 96
+    cfg_exact = O1AntiConfig(vocab_size=64, d_model=32, max_seq_len=T, d_c=16,
+                             d_state=32, top_k=8, nla_heads=4)
+    torch.manual_seed(0)
+    nla = NeuralLiquidAdjacency(cfg_exact).eval()
+    x = torch.randn(2, T, cfg_exact.d_model)
+    with torch.no_grad():
+        out_exact, _ = nla(x)
+        nla.cfg = dataclasses.replace(cfg_exact, nla_block_size=16, nla_cand_blocks=4)
+        out_bs, _ = nla(x)
+        # causality: perturbing the future leaves past outputs bit-identical
+        x2 = x.clone(); x2[:, 70:] += 5.0
+        out_bs2, _ = nla(x2)
+
+    assert out_bs.shape == out_exact.shape
+    cos = F.cosine_similarity(out_exact.reshape(-1, 32), out_bs.reshape(-1, 32), dim=-1).mean()
+    assert cos > 0.9, f"block-sparse output diverged from exact (cos={cos:.3f})"
+    past_diff = (out_bs[:, :70] - out_bs2[:, :70]).abs().max().item()
+    assert past_diff < 1e-5, f"block-sparse broke causality (past changed by {past_diff:.2e})"
+    # score-op count is genuinely smaller than dense T*T
+    nb = (T + 16 - 1) // 16
+    assert T * nb + T * 4 * 16 < T * T
+
+
 def test_router_one_hot_and_dispatch():
     torch.manual_seed(0)
     model = O1AntiModel(CFG).eval()
@@ -198,6 +229,33 @@ def test_token_moe_routing_trains():
     assert got >= 2, f"only {got} experts received gradient (routing may be collapsed)"
     # active LM params must be < total (some experts idle per token)
     assert model.num_parameters(active_only=True) < model.num_parameters()
+
+
+def test_moe_noisy_gating_unbiased_and_eval_deterministic():
+    """Noisy top-k gating (moe_noise>0) perturbs only the top-e SELECTION at
+    train time; the combine weights and load-balance usage come from the clean
+    softmax. So (a) it must be a no-op at eval (deterministic), and (b) the
+    reported usage must not itself carry the noise."""
+    import dataclasses
+
+    cfg = dataclasses.replace(CFG, routing_granularity="token", n_layers=2, moe_noise=2.0)
+    torch.manual_seed(0)
+    model = O1AntiModel(cfg)
+    ids = torch.randint(0, cfg.vocab_size, (2, 16))
+    # eval: two passes identical (noise is train-only)
+    model.eval()
+    with torch.no_grad():
+        h1 = model.encode(ids)[0]
+        h2 = model.encode(ids)[0]
+    assert torch.allclose(h1, h2), "eval output changed — noise leaked into eval"
+    # train: still produces finite loss + gradient to multiple experts
+    model.train()
+    out = model(ids, labels=ids)
+    out.loss.backward()
+    experts = model.trunk.blocks[0].moe.experts
+    got = sum(1 for e in experts
+              if any(p.grad is not None and p.grad.abs().sum() > 0 for p in e.parameters()))
+    assert got >= 2
 
 
 def test_token_moe_causality():

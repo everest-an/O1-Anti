@@ -145,13 +145,25 @@ class MoEFeedForward(nn.Module):
 
     def forward(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """h: (B, T, d) → (out, usage (E,)). Top-e experts per token, combined
-        by renormalized softmax gate weights; unselected experts don't run."""
+        by renormalized softmax gate weights; unselected experts don't run.
+
+        Selection uses noisy logits at train time (Shazeer 2017) so exploration
+        keeps every expert occasionally winning a token; the COMBINE weights and
+        the load-balance `usage` signal come from the clean softmax so the
+        gradient is unbiased."""
         B, T, d = h.shape
         E, top_e = self.cfg.n_modules, self.cfg.moe_top_e
         flat = h.reshape(-1, d)                               # (N, d)
-        probs = F.softmax(self.gate(flat), dim=-1)            # (N, E)
-        topw, topi = probs.topk(top_e, dim=-1)               # (N, top_e)
-        topw = topw / topw.sum(dim=-1, keepdim=True)          # renormalize
+        logits = self.gate(flat)                              # (N, E)
+        probs = F.softmax(logits, dim=-1)                     # clean gate (grad + balance)
+
+        sel_logits = logits
+        if self.training and self.cfg.moe_noise > 0:
+            sel_logits = logits + (self.cfg.moe_noise / E) * torch.randn_like(logits)
+        topi = sel_logits.topk(top_e, dim=-1).indices        # (N, top_e) — which experts
+        # combine weights from the CLEAN softmax, renormalized over the chosen set
+        topw = probs.gather(1, topi)
+        topw = topw / topw.sum(dim=-1, keepdim=True)          # (N, top_e)
 
         out = torch.zeros_like(flat)
         for m in range(E):
