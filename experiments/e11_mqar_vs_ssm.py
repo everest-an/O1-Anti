@@ -155,8 +155,9 @@ def run(kind, pairs, args, device, seed):
                            nla_heads=args.nla_heads)
         model = TinyLM(kind, cfg, max_len=seq_len, n_blocks=args.n_blocks).to(device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     t0 = time.time()
+    grok_step = None
     for step in range(args.steps):
         seq, score = make_batch(args.batch, pairs, args.queries, device, dgen)
         logits = logits_of(model, kind, seq)
@@ -172,6 +173,8 @@ def run(kind, pairs, args, device, seed):
                 vp = logits_of(model, kind, vs)[:, :-1].argmax(-1)
                 vm = vsc[:, :-1]
                 vacc = (vp[vm] == vs[:, 1:][vm]).float().mean().item()
+            if grok_step is None and vacc > 0.9:
+                grok_step = step + 1
             print(f"    [{kind} P={pairs} seed={seed}] step {step+1}/{args.steps} "
                   f"loss {loss.item():.4f} acc {vacc:.3f}", flush=True)
     train_s = time.time() - t0
@@ -184,7 +187,7 @@ def run(kind, pairs, args, device, seed):
         tgt = seq[:, 1:]
         m = score[:, :-1]
         acc = (pred[m] == tgt[m]).float().mean().item()
-    return {"acc": acc, "train_s": train_s,
+    return {"acc": acc, "train_s": train_s, "grok_step": grok_step,
             "params": sum(p.numel() for p in model.parameters())}
 
 
@@ -216,6 +219,7 @@ def main():
     ap.add_argument("--mamba_layers", type=int, default=6)
     ap.add_argument("--mamba_state", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)  # 1e-3 (not 2e-3) is stabler here
+    ap.add_argument("--weight_decay", type=float, default=0.01)  # grokking lever (diagnostic)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
     device = args.device
