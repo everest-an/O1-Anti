@@ -15,6 +15,7 @@ New capabilities can be added by growing the library and finetuning only the
 router — old modules stay frozen (incremental learning for free).
 """
 
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -24,6 +25,46 @@ import torch.nn.functional as F
 from .config import O1AntiConfig
 from .losses import state_continuity_loss
 from .nla import NeuralLiquidAdjacency
+
+
+class RoPECausalAttention(nn.Module):
+    """Causal multi-head self-attention with rotary position embeddings.
+
+    Used as the attention mixer in a hybrid TokenMoETrunk. Unlike NLA — whose
+    liquid state scan encodes position implicitly — plain softmax attention is
+    permutation-equivariant and needs explicit positional grounding, so RoPE is
+    baked in (rotating q,k) rather than relying on an external pos embedding.
+    """
+
+    def __init__(self, d: int, heads: int):
+        super().__init__()
+        assert d % heads == 0 and (d // heads) % 2 == 0, "head dim must be even for RoPE"
+        self.h = heads
+        self.dh = d // heads
+        self.qkv = nn.Linear(d, 3 * d)
+        self.proj = nn.Linear(d, d)
+
+    def _rope(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, H, T, dh) → rotary-embedded (LLaMA half-split convention)."""
+        T, dh = x.shape[-2], x.shape[-1]
+        pos = torch.arange(T, device=x.device, dtype=x.dtype)
+        inv = 1.0 / (10000.0 ** (torch.arange(0, dh, 2, device=x.device, dtype=x.dtype) / dh))
+        ang = torch.outer(pos, inv)                       # (T, dh/2)
+        cos = torch.cat([ang.cos(), ang.cos()], dim=-1)   # (T, dh)
+        sin = torch.cat([ang.sin(), ang.sin()], dim=-1)
+        x1, x2 = x[..., : dh // 2], x[..., dh // 2:]
+        xr = torch.cat([-x2, x1], dim=-1)
+        return x * cos + xr * sin
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, d = x.shape
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q = q.view(B, T, self.h, self.dh).transpose(1, 2)     # (B, H, T, dh)
+        k = k.view(B, T, self.h, self.dh).transpose(1, 2)
+        v = v.view(B, T, self.h, self.dh).transpose(1, 2)
+        q, k = self._rope(q), self._rope(k)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return self.proj(out.transpose(1, 2).reshape(B, T, d))
 
 
 class ContextEncoder(nn.Module):
@@ -196,7 +237,7 @@ class MoEBlock(nn.Module):
         self.mixer_kind = mixer
         self.norm1 = nn.LayerNorm(cfg.d_model)
         if mixer == "attn":
-            self.attn = nn.MultiheadAttention(cfg.d_model, cfg.nla_heads, batch_first=True)
+            self.attn = RoPECausalAttention(cfg.d_model, cfg.nla_heads)
         else:
             self.nla = NeuralLiquidAdjacency(cfg)
         self.norm2 = nn.LayerNorm(cfg.d_model)
@@ -205,8 +246,7 @@ class MoEBlock(nn.Module):
     def forward(self, h: torch.Tensor):
         x = self.norm1(h)
         if self.mixer_kind == "attn":
-            mask = nn.Transformer.generate_square_subsequent_mask(h.shape[1], device=h.device)
-            mixed = self.attn(x, x, x, attn_mask=mask, need_weights=False)[0]
+            mixed = self.attn(x)                          # RoPE causal attention
             s = None
         else:
             mixed, s = self.nla(x)
