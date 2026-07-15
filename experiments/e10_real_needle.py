@@ -167,7 +167,7 @@ def run(kind, corpus, ctx_len, args, device, seed):
         d_c=args.d_c, d_state=64, top_k=args.top_k, d_ff=4 * args.d_model,
     )
     model = TinyLM(kind, cfg, max_len=ctx_len).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    opt = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=args.weight_decay)
     gen = torch.Generator(device=device).manual_seed(seed)
     t0 = time.time()
     for step in range(args.steps):
@@ -213,6 +213,10 @@ def main():
     ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--d_c", type=int, default=32)
     ap.add_argument("--top_k", type=int, default=16)
+    ap.add_argument("--weight_decay", type=float, default=0.01,
+                    help="AdamW weight decay (0.01 = torch default, what prior E10 runs "
+                         "implicitly used); 0.1 stabilizes grokking on the harder lengths "
+                         "(E11 lesson) — L=256 was bimodal at the 0.01 default")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0],
                     help="train+eval each (kind, length) once per seed and report mean+std "
                          "(this task shows threshold-like convergence — single-seed "
