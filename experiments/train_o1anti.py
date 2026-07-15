@@ -141,7 +141,7 @@ def evaluate(model, data, batch, seq, iters, device, is_o1anti):
 
 
 def train(model, data_tr, data_va, args, device, is_o1anti):
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     gen = torch.Generator(device=device).manual_seed(args.seed)
     t0 = time.time()
     for step in range(args.steps):
@@ -179,6 +179,9 @@ def main():
     ap.add_argument("--hybrid_attn_every", type=int, default=0,
                     help="token routing: every N-th layer uses full attention (0=all NLA)")
     ap.add_argument("--nla_heads", type=int, default=1, help="NLA routing/value heads")
+    ap.add_argument("--expert_router", choices=["plain", "topology"], default="plain",
+                    help="token MoE gate: plain linear, or 'NLA Router' expert-topology diffusion")
+    ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -202,6 +205,7 @@ def main():
         d_ctx=args.d_model, skeleton_mode="regress",
         routing_granularity=args.routing, n_layers=args.n_layers, moe_top_e=args.moe_top_e,
         nla_heads=args.nla_heads, hybrid_attn_every=args.hybrid_attn_every,
+        expert_router=args.expert_router,
     )
     o1 = O1AntiModel(cfg).to(device)
     o1_active = lm_active_params(o1, cfg)
