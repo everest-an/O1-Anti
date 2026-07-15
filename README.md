@@ -37,32 +37,34 @@ Full design and derivations: [`O1ANTI_ARCHITECTURE.md`](O1ANTI_ARCHITECTURE.md).
 | **P3** latency | Parallel decode vs autoregressive (len-48 reconstruction) | AR-equal 1.000 in **14 passes vs 48** (3.4× fewer) | **GO** |
 | **P4** integration | All three pillars in one trained model | 1.000 generated at **74% activation, 7 passes vs 48** | **GO** |
 | **E8** real text | Byte-level LM on WikiText-2 vs matched dense | **+22% BPB behind** dense (3.51 vs 2.87) | **GAP** |
-| **E10** real text | Needle retrieval in real WikiText, 2 seeds/length | NLA **0.75–0.84 vs dense 0.03–0.27** at L=128/512 (both seeds), 6× cache; L=256 bimodal | **GO*** |
-| **E11** recall | MQAR: NLA vs attention vs Mamba (SSM) | at `wd=0.1` NLA **1.000 = attention** (pairs 8, 16, multi-seed) and beats Mamba's 0.81; pairs=32 needs GPU-scale budget | **GO** |
+| **E10** real text | Needle retrieval in real WikiText, 2 seeds/length | **RETRACTED** — the NLA "win" was a weight-decay artifact; at `wd=0.1` (both models regularized) it's a wash (L=128 dense 0.74 vs NLA 0.67, both bimodal) | **INCONCLUSIVE** |
+| **E11** recall | MQAR: NLA vs attention vs Mamba (SSM) | at `wd=0.1` NLA **1.000 = attention** (pairs 8, 16, multi-seed) — *matches* the ceiling at lower cache; Mamba comparison not yet clean (was `wd=0.01`) | **GO (parity)** |
 
 The four synthetic go/no-go tests (P1–P4) all pass, and the pillars **compose** in
-one end-to-end model. The two real-text probes tell opposite, and complementary,
-stories: **E8** is honest about the limit — on generic English LM the trunk
-trails a matched dense Transformer by ~22% bits-per-byte, and four ablations
-(token routing, full-dim/full-K NLA, multi-head NLA) each fail to close it, so
-the gap looks intrinsic to the design at this scale. **E10** is the other side —
-on sparse content-addressed retrieval embedded in real text, NLA beats dense by
-a wide margin, reproducibly across 2 independent seeds, at L=128 and L=512. At
-L=256 its optimization is bimodal — one seed groks to 0.85, the other stalls at
-0.03 even at 12000 steps — so its *ceiling* clearly beats dense there too, but
-whether it converges within budget is seed-dependent (reported honestly, not
-cherry-picked). **E11** isolates the pure capability the niche rests on —
-content-addressed associative recall (MQAR) vs a real SSM (Mamba). It also nearly
-buried the direction: at the default `weight_decay=0.01` NLA looked refuted
-(bimodal, and it plus attention both collapsed at pairs=16). A grokking diagnostic
-found the cause was the hyperparameter, not the architecture — at **`wd=0.1` NLA
-reliably reaches attention-level recall (1.000 at pairs 8 and 16, multiple seeds)
-and beats Mamba's 0.81**, confirming *SSM-cheap cache + attention-precise recall*
-(pairs=32 needs a GPU-scale budget to settle). The read: O1-Anti's
-compressed-state, sparse-routed design **trades generic-LM quality (E8) for
-strength on sparse, content-addressed retrieval (E10, E11)** — exactly the
-workload its inductive bias targets. Full analysis in `O1ANTI_ARCHITECTURE.md`
-§ E8/E10/E11.
+one end-to-end model. The real-text and recall probes are more sobering, and a
+**weight-decay confound** runs through them (documented honestly rather than
+buried):
+
+- **E8 (generic LM):** NLA trails a matched dense Transformer by ~22% BPB, and
+  four ablations fail to close it. A real, intrinsic limit at this scale.
+- **E10 (real-text retrieval): RETRACTED.** The earlier "NLA beats dense" result
+  was run at the torch-default `weight_decay=0.01`. Re-running with **both** models
+  properly regularized (`wd=0.1`) erases the gap — L=128 becomes a bimodal wash
+  (dense 0.74 vs NLA 0.67), L=512 both fail to grok in budget. NLA's apparent
+  real-text retrieval advantage does **not** survive a fair comparison.
+- **E11 (associative recall, MQAR):** the one clean positive. At `wd=0.1` NLA
+  reliably reaches **attention-level** recall (1.000 at pairs 8 and 16, multiple
+  seeds, cross-validated) — it *matches* the ceiling, at a fraction of the cache.
+  It does not *exceed* attention; the value is parity-quality at lower cache cost.
+  (The Mamba comparison is not yet clean — Mamba was at `wd=0.01`; needs a GPU
+  re-run.)
+
+**Honest current read:** the strongest supported claim is *NLA matches attention
+on synthetic content-recall at ~6–8× smaller cache* (E11 + the analytic cache
+win). The real-text retrieval advantage (E10) did not hold up; generic LM (E8) is
+a real weakness. This is a narrower, efficiency-parity story — not a demonstrated
+quality advantage on real tasks. Full analysis in `O1ANTI_ARCHITECTURE.md`
+§ E8/E10/E11; honest positioning in `O1ANTI_POSITIONING.md`.
 
 > **Positioning.** The honest, evidence-based product thesis — *a
 > memory-efficient architecture for retrieval- and long-context-heavy

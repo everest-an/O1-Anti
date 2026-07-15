@@ -231,7 +231,20 @@ Reproduce: `python experiments/train_o1anti.py --steps 1500 --seq 128 --d_model
 128` (global); add `--routing token`, `--nla_heads 4`, or `--d_c 128 --top_k 128`
 for the ablations.
 
-### E10 — Sparse retrieval on real text (NLA's actual home turf)
+### E10 — Sparse retrieval on real text — RETRACTED (weight-decay confound)
+
+> **Retraction (2026-07-16).** The positive E10 result below was run at the torch
+> AdamW default `weight_decay=0.01`. After E11 revealed how strongly this task's
+> grokking depends on weight decay, E10 was re-run with **both** models properly
+> regularized (`wd=0.1`): the NLA advantage disappears — L=128 becomes a bimodal
+> wash (dense 0.743 ± 0.238 vs NLA 0.670 ± 0.315, each winning one seed), and at
+> L=512 neither model groks within 6000 steps (dense 0.025, NLA 0.010). So the
+> "NLA beats dense on real-text retrieval" claim was a hyperparameter artifact:
+> at `wd=0.01`, NLA's grokking happened to fire while dense's didn't; regularize
+> both and the gap vanishes. **E10 no longer supports an NLA-over-dense retrieval
+> advantage.** The original write-up is kept below for the record, struck through
+> in spirit. Reproduce the retraction: `--lengths 128 512 --steps 6000 --seeds
+> 0 1 --weight_decay 0.1`.
 
 E8 measured generic LM — NLA's documented weak spot. E10 tests the setting P1
 already validated NLA for (sparse content-based retrieval), but embedded in real
@@ -320,21 +333,25 @@ chain is recorded:
    | 16 | 0.997 ± 0.003 | **1.000 ± 0.000** (2/2) | NLA = ceiling, tracks as pairs grow |
    | 32 | 0.083 | 0.073 | inconclusive — *neither* groks in 15k steps (grokking cost explodes with pairs; needs GPU-scale budget) |
 
-**Verdict: GO on the recall niche, with an honest boundary.** Where the task is
-solvable within budget (pairs 8, 16), NLA reliably reaches attention-level recall
-(1.000, multiple seeds, cross-validated) — and beats Mamba's 0.81 at pairs=16 —
-confirming *SSM-cheap cache + attention-precise recall*. The `pairs=8→16`
-collapse in step 2 was **entirely a `wd=0.01` artifact**, not a capability limit.
-`pairs=32` is genuinely inconclusive (the grokking step-cost grows steeply with
-`D` — 8→~2k steps, 16→~5k, 32→>15k — and *attention itself* doesn't grok it in
-15k CPU steps, so it isn't an NLA-specific failure); confirming it needs a
-GPU-scale budget, still pending.
+**Verdict: parity with attention on recall — the one clean positive, but read it
+precisely.** Where the task is solvable within budget (pairs 8, 16), NLA reliably
+reaches attention-level recall (1.000, multiple seeds, cross-validated). It
+**matches** the attention ceiling — it does **not** exceed it; the value is
+parity recall quality at ~6–8× smaller cache, not higher quality. The `pairs=8→16`
+collapse seen earlier was **entirely a `wd=0.01` artifact**, not a capability
+limit. Two honest caveats: (a) the **Mamba comparison is not clean** — the 0.81
+Mamba number was at `wd=0.01`; a fair `wd=0.1` Mamba re-run (needs GPU) is pending,
+so "beats a real SSM" is **not yet established**, only "matches attention"; (b)
+`pairs=32` is inconclusive (grokking step-cost grows steeply with `D` — 8→~2k
+steps, 16→~5k, 32→>15k — and *attention itself* doesn't grok it in 15k CPU steps).
 
 **Two lessons worth keeping.** (a) A single wrong hyperparameter (`wd`) nearly
-buried a valid architecture — the negative result in step 2 was reported honestly
-at the time, but only a disciplined diagnostic distinguished "refuted" from
-"mistuned." (b) E10's L=256 bimodality is very likely the **same** grokking
-instability; re-testing E10 at `wd=0.1` is the natural follow-up.
+buried a valid capability — the negative result was reported honestly at the time,
+but only a disciplined diagnostic distinguished "refuted" from "mistuned." (b) The
+same `wd` confound cut the *other* way for E10: re-testing E10 at `wd=0.1` (the
+natural follow-up) **retracted** its NLA-over-dense win (see the E10 retraction
+above) — the hyperparameter that rescued E11 dismantled E10. The discipline is the
+same in both directions: regularize both models fairly before believing a gap.
 
 Reproduce: `python experiments/e11_mqar_vs_ssm.py --steps 12000 --pairs 8 16
 --seeds 0 1 --archs attention nla --weight_decay 0.1`; diagnostic: `python

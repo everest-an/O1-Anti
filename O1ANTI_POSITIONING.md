@@ -10,38 +10,46 @@ keeps the ambition but points it where the evidence points.
 | Claim | Verdict | Evidence |
 |---|---|---|
 | NLA is a **memory-efficient sequence mixer** (O(n·d_c) cache, ~6–8× smaller than KV) | ✅ **holds** | analytic + P1 |
-| NLA does **attention-precise content recall** | ✅ **holds** (at `wd=0.1`) | E11 MQAR: 1.000 = attention at pairs 8/16, beats Mamba 0.81 |
-| NLA **beats dense on real-text sparse retrieval** | ✅ **holds** (2/3 lengths) | E10: L=128/512, 6× cache |
+| NLA **matches attention** on content recall (parity quality, lower cache) | ✅ **holds** (at `wd=0.1`) | E11 MQAR: 1.000 = attention at pairs 8/16, multi-seed |
+| NLA **beats a real SSM (Mamba)** at recall | ❓ **not clean** | E11 Mamba was at `wd=0.01`; fair re-run pending (GPU) |
+| NLA **beats dense on real-text sparse retrieval** | ❌ **RETRACTED** | E10 win was a `wd=0.01` artifact; at `wd=0.1` it's a wash (L=128) / both undertrained (L=512) |
 | NLA matches dense on **generic language modeling** | ❌ **fails** | E8: −22% BPB, robust to 5 ablations |
 | "NLA Router" (expert-topology MoE routing) is a differentiator | ❌ **no benefit** | 3-seed ablation: 3.366 vs 3.371, < noise, +2.6% params |
 | Residual-VQ **weight** compression works | ❓ **untested** | (E9 validated VQ as a *latent* codec, not weights) |
 | GWT bottleneck is an efficiency win | ❌ **no measured win** | relocated to "inspiration" in MT-LNN |
 | 160B / 1–3T tokens / <100万 RMB / MMLU>65% | ❌ **no scaling evidence** | — |
 
-**One-line reading:** the *sequence-mixer* NLA is a genuine, validated asset —
-**efficient long-range retrieval**. The plan's other three differentiators are
-either disproven (expert-router), untested (weight-VQ), or non-load-bearing
-(GWT). And the plan *misuses* the one thing that works (NLA-the-mixer) as an
-expert-router, which it is not.
+**One-line reading (updated after the E10 retraction):** the strongest supported
+claim has shrunk to *NLA matches attention-level recall on a synthetic task
+(MQAR) at ~6–8× smaller cache* — **efficiency parity, not a quality advantage.**
+The real-text retrieval win (E10) did not survive a fair (both-regularized)
+comparison; generic LM (E8) is a real weakness; and none of the plan's own
+differentiators (expert-router, weight-VQ, GWT) are validated. What remains is a
+genuine but **modest** efficiency result — "as good as attention on recall, for
+less cache" — demonstrated only synthetically so far.
 
 ## 2. The honest product thesis
 
-Not "an anti-Transformer that beats DeepSeek on everything." The evidence
-supports something narrower and real:
+Not "an anti-Transformer that beats DeepSeek on everything." And — after the E10
+retraction — not even "beats dense on retrieval." The honest, evidence-backed
+claim is now a **hypothesis with one supporting data point**:
 
-> **A memory-efficient architecture for retrieval- and long-context-heavy
-> workloads**, where the KV-cache is the bottleneck and the task is dominated by
-> *finding and copying the right information* rather than dense many-relations
-> reasoning.
+> **A memory-efficient mixer that may match attention's recall quality at a
+> fraction of the cache** — useful where the KV-cache is the bottleneck and the
+> task is dominated by *finding and copying the right information*.
 
-Where it wins (evidence-backed): long-document QA, retrieval-augmented
-generation, agent/long-memory contexts, needle-in-haystack — anywhere the cache
-cost dominates and recall precision matters. Where it doesn't (evidence-backed):
-generic open-domain language modeling, where dense attention's many-relations
-mixing is worth its cost (E8's −22% is real and unclosed).
+What the evidence actually says today: NLA reaches **attention-level** recall on a
+*synthetic* task (E11 MQAR, `wd=0.1`) at ~6–8× smaller cache — parity quality, not
+better. It does **not** beat dense on real-text retrieval once both are fairly
+regularized (E10 retracted), and it is **worse** on generic LM (E8, −22%). So the
+niche is a **plausible but under-evidenced** one: "as good as attention on recall,
+cheaper cache." It needs real-task confirmation (Stage 0/1 below) before it is a
+product thesis rather than a hopeful hypothesis.
 
-This is a **defensible niche**, not a defeat. "Efficient recall at SSM-cache
-cost" is exactly the gap the Based/Zoology line cares about, and NLA clears it.
+Honest framing: this is **not** a validated DeepSeek competitor, and **not yet**
+even a validated retrieval specialist — it is one clean synthetic parity result
+plus an analytic cache advantage, with the real-text evidence retracted. That is a
+lead worth pursuing cheaply, not a foundation to scale on.
 
 ## 3. Evidence-gated roadmap (replaces the 160B leap)
 
