@@ -64,6 +64,14 @@ strength on sparse, content-addressed retrieval (E10, E11)** — exactly the
 workload its inductive bias targets. Full analysis in `O1ANTI_ARCHITECTURE.md`
 § E8/E10/E11.
 
+> **Positioning.** The honest, evidence-based product thesis — *a
+> memory-efficient architecture for retrieval- and long-context-heavy
+> workloads*, not a general-purpose Transformer/DeepSeek replacement — and an
+> evidence-gated roadmap are in [`O1ANTI_POSITIONING.md`](O1ANTI_POSITIONING.md).
+> Mechanisms proposed but not validated (expert-topology routing — ablated, no
+> benefit; weight-VQ — untested; GWT bottleneck — no measured win) are tracked in
+> [`DEV_PLAN_REALITY_MAP.md`](DEV_PLAN_REALITY_MAP.md).
+
 ### P1 — Neural Liquid Adjacency (memory)
 
 Instead of caching K and V (`2·d_model` per token per layer), each position
