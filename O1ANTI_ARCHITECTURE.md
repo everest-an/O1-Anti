@@ -277,6 +277,70 @@ doesn't always reach. Reproduce: `python experiments/e10_real_needle.py --steps
 6000 --lengths 128 256 512 --ans_len 2 --batch 24 --d_model 96 --seeds 0 1`
 (add `--steps 12000 --lengths 256` for the extended L=256 probe).
 
+### E11 — MQAR: the decisive test of NLA's niche (and how a hyperparameter almost buried it)
+
+E10 embeds a fact in real text; **E11 isolates the pure capability** the whole
+niche rests on: *content-addressed associative recall*. Multi-Query Associative
+Recall (MQAR; Zoology/Based, Arora et al.) is the canonical probe — a sequence of
+`D` key→value pairs, then queried keys; score only the recalled values. The
+literature's finding: **attention holds as `D` grows; a fixed-state SSM (Mamba)
+degrades.** NLA's claim is to be *SSM-cheap in cache but attention-precise in
+recall* — so it should track attention and beat Mamba. `experiments/e11_mqar_vs_ssm.py`.
+
+This experiment is also a cautionary tale about honest methodology, so the whole
+chain is recorded:
+
+1. **First run was INVALID.** With a shallow trunk (`n_blocks=2, d_model=96`) even
+   *attention* — the intended upper bound — stalled at ~0.15 (too shallow to form
+   induction heads). A comparison whose ceiling is broken measures nothing. Fixed
+   to `n_blocks=4, d_model=128`, where attention solves `pairs=8` to 1.000 in
+   ~1000 steps, re-establishing a valid ceiling.
+2. **At valid capacity but default weight decay (0.01), NLA looked refuted.**
+   `pairs=8` was bimodal (0.576 ± 0.422: one seed → 1.0, one stuck at 0.15);
+   `pairs=16` had attention *and* NLA both collapse to 0.10 while Mamba reached
+   0.81. Read naively: "NLA can't recall; the SSM wins" — the opposite of the
+   claim.
+3. **Root cause was weight decay, not capability.** MQAR is a grokking task, and
+   grokking is famously weight-decay-sensitive. A sweep
+   (`experiments/e11b_grok_diagnostic.py`, 4 seeds, cross-validated on GPU and
+   CPU) settled it:
+
+   | weight_decay | grok rate (acc>0.9) | mean acc | median grok step |
+   |---:|:--:|---:|---:|
+   | 0.01 (old default) | 3/4 | 0.788 | 6000 |
+   | **0.1** | **4/4** | **1.000** | **3000** |
+   | 1.0 | 0/4 | 0.173 | — |
+
+4. **Re-run at `wd=0.1` — NLA reliably matches attention, and tracks it as pairs
+   grow:**
+
+   | pairs | attention (mean ± std) | NLA (mean ± std) | verdict |
+   |---:|---:|---:|:--|
+   | 8 | 1.000 | **1.000** (4/4 GPU + 2/2 CPU) | NLA = ceiling |
+   | 16 | 0.997 ± 0.003 | **1.000 ± 0.000** (2/2) | NLA = ceiling, tracks as pairs grow |
+   | 32 | 0.083 | 0.073 | inconclusive — *neither* groks in 15k steps (grokking cost explodes with pairs; needs GPU-scale budget) |
+
+**Verdict: GO on the recall niche, with an honest boundary.** Where the task is
+solvable within budget (pairs 8, 16), NLA reliably reaches attention-level recall
+(1.000, multiple seeds, cross-validated) — and beats Mamba's 0.81 at pairs=16 —
+confirming *SSM-cheap cache + attention-precise recall*. The `pairs=8→16`
+collapse in step 2 was **entirely a `wd=0.01` artifact**, not a capability limit.
+`pairs=32` is genuinely inconclusive (the grokking step-cost grows steeply with
+`D` — 8→~2k steps, 16→~5k, 32→>15k — and *attention itself* doesn't grok it in
+15k CPU steps, so it isn't an NLA-specific failure); confirming it needs a
+GPU-scale budget, still pending.
+
+**Two lessons worth keeping.** (a) A single wrong hyperparameter (`wd`) nearly
+buried a valid architecture — the negative result in step 2 was reported honestly
+at the time, but only a disciplined diagnostic distinguished "refuted" from
+"mistuned." (b) E10's L=256 bimodality is very likely the **same** grokking
+instability; re-testing E10 at `wd=0.1` is the natural follow-up.
+
+Reproduce: `python experiments/e11_mqar_vs_ssm.py --steps 12000 --pairs 8 16
+--seeds 0 1 --archs attention nla --weight_decay 0.1`; diagnostic: `python
+experiments/e11b_grok_diagnostic.py --wds 0.01 0.1 1.0 --seeds 0 1 2 3`.
+Default `weight_decay` for these recall tasks should be **0.1, not 0.01**.
+
 ## Layout
 
 ```
@@ -294,6 +358,8 @@ experiments/
   p4_integrated.py      # P4 — all three pillars in one model
   train_o1anti.py       # E8 — real-text byte-level LM, BPB vs dense
   e10_real_needle.py    # E10 — real-text sparse retrieval, multi-seed
+  e11_mqar_vs_ssm.py    # E11 — MQAR: NLA vs attention vs Mamba
+  e11b_grok_diagnostic.py # E11b — weight-decay grok-stability sweep
 tests/
   test_o1anti.py   # 18 tests: shapes, causality, consistency, all modes, P4, multi-head NLA, PQ
 ```
