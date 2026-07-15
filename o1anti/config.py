@@ -70,6 +70,15 @@ class O1AntiConfig:
     # penalty suffices). So this is available hardening for larger/harder runs,
     # NOT a fix for an observed collapse. Default 0 (exact, matches validated E8).
     moe_noise: float = 0.0
+    # expert_router (token MoE only): how gate logits are formed before top-e.
+    #   "plain"    — standard linear gate (default, matches validated results).
+    #   "topology" — "NLA Router": a per-token expert-to-expert adjacency (a
+    #                learned E×E topology from the token) diffuses each expert's
+    #                base score into its neighbours, then top-e. This is the dev
+    #                plan's 创新点1 (expert-graph routing) — a DIFFERENT mechanism
+    #                from the NLA sequence mixer, needing its own from-zero
+    #                ablation (see DEV_PLAN_REALITY_MAP.md §1). UNVALIDATED.
+    expert_router: str = "plain"
 
     # --- pillar 3: liquid state-transition generation ---
     skel_len: int = 16      # semantic skeleton length (L_skel)

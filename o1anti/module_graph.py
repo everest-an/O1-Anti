@@ -178,6 +178,13 @@ class MoEFeedForward(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.gate = nn.Linear(cfg.d_model, cfg.n_modules)
+        # "NLA Router" (topology): a per-token E×E expert adjacency that diffuses
+        # base gate scores into neighbour experts before top-e. Init near zero so
+        # at start it is a no-op residual on top of the plain gate (stable).
+        if cfg.expert_router == "topology":
+            self.adj_proj = nn.Linear(cfg.d_model, cfg.n_modules * cfg.n_modules)
+            nn.init.zeros_(self.adj_proj.weight)
+            nn.init.zeros_(self.adj_proj.bias)
         self.experts = nn.ModuleList(
             nn.Sequential(nn.Linear(cfg.d_model, cfg.d_ff), nn.GELU(),
                           nn.Linear(cfg.d_ff, cfg.d_model))
@@ -196,6 +203,15 @@ class MoEFeedForward(nn.Module):
         E, top_e = self.cfg.n_modules, self.cfg.moe_top_e
         flat = h.reshape(-1, d)                               # (N, d)
         logits = self.gate(flat)                              # (N, E)
+        if self.cfg.expert_router == "topology":
+            # per-token expert adjacency A (N, E, E), row-normalized so each
+            # expert pulls a *distribution* of neighbour scores; residual
+            # diffusion so it starts as a no-op (adj_proj init 0 → A uniform →
+            # propagated ≈ mean, scaled by the residual; gains signal as trained).
+            adj = self.adj_proj(flat).view(-1, E, E)
+            adj = F.softmax(adj, dim=-1)                      # (N, E, E)
+            propagated = torch.bmm(adj, logits.unsqueeze(-1)).squeeze(-1)
+            logits = logits + propagated                     # expert-graph diffusion
         probs = F.softmax(logits, dim=-1)                     # clean gate (grad + balance)
 
         sel_logits = logits

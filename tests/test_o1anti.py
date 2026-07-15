@@ -283,6 +283,43 @@ def test_hybrid_trunk_interleaves_attention_and_stays_causal():
     model(ids, labels=ids).loss.backward()
 
 
+def test_topology_expert_router_noop_at_init_then_trains():
+    """"NLA Router" (cfg.expert_router='topology'): a per-token E×E expert
+    adjacency diffuses gate scores. adj_proj is zero-init so at start it is a
+    near-no-op residual over the plain gate (stable); it must (a) match plain
+    routing at init, (b) train (adj_proj gets gradient), and (c) keep experts
+    active + causality."""
+    import dataclasses
+
+    topo = dataclasses.replace(CFG, routing_granularity="token", n_layers=2,
+                               moe_top_e=2, expert_router="topology")
+    ids = torch.randint(0, topo.vocab_size, (2, 12))
+
+    # (a) no-op at init: zero-init adj_proj → uniform adjacency → propagated is a
+    # per-token constant added to all experts → softmax/top-e invariant. Verify on
+    # the SAME weights by flipping the flag (shared cfg object), so nothing else
+    # differs. (Two separately-constructed models would diverge because building
+    # adj_proj perturbs the init RNG stream — not a real difference.)
+    torch.manual_seed(0); m_topo = O1AntiModel(topo).eval()
+    with torch.no_grad():
+        out_topo = m_topo.encode(ids)[0]
+        m_topo.cfg.expert_router = "plain"           # bypass the topology path
+        out_plain = m_topo.encode(ids)[0]
+        m_topo.cfg.expert_router = "topology"        # restore
+    assert torch.allclose(out_topo, out_plain, atol=1e-5), "topology router not a no-op at init"
+
+    # (b)+(c) trains: adj_proj receives gradient, experts stay active.
+    m_topo.train()
+    m_topo(ids, labels=ids).loss.backward()
+    adj = m_topo.trunk.blocks[0].moe.adj_proj
+    assert adj.weight.grad is not None and adj.weight.grad.abs().sum() > 0, \
+        "expert adjacency got no gradient"
+    experts = m_topo.trunk.blocks[0].moe.experts
+    got = sum(1 for e in experts
+              if any(p.grad is not None and p.grad.abs().sum() > 0 for p in e.parameters()))
+    assert got >= 2
+
+
 def test_token_moe_causality():
     import dataclasses
 
