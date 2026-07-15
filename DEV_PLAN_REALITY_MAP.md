@@ -25,7 +25,25 @@ is really "introducing three untested components under familiar labels."
 |---|---|---|
 | What it is | A router that adds **dynamic topology between MoE experts** — expert-to-expert adjacency that reshapes routing scores per input | A **sequence mixer** that replaces softmax attention: top-K content routing over compressed per-token states `c_j`, with a liquid state scan |
 | Operates over | The expert set (a routing prior) | The token sequence (an attention replacement) |
-| What we measured | ❌ nothing — this mechanism does not exist in the repo | ✅ P1 (matches dense attention on selective copy, 8× smaller cache); ⚠️ E8 (−22% on generic LM, robust to 5 ablations); ✅ E10 (beats dense on real-text retrieval at 2/3 lengths); ✅ E11 (attention-level MQAR recall at `wd=0.1`, pairs 8/16, beats Mamba) |
+| What we measured | ❌→ now **implemented + ablated, NO benefit** (see below) | ✅ P1 (matches dense attention on selective copy, 8× smaller cache); ⚠️ E8 (−22% on generic LM, robust to 5 ablations); ✅ E10 (beats dense on real-text retrieval at 2/3 lengths); ✅ E11 (attention-level MQAR recall at `wd=0.1`, pairs 8/16, beats Mamba) |
+
+**ABLATED (2026-07-15) — the "NLA Router" does not help.** Implemented as
+`cfg.expert_router="topology"` (per-token E×E expert adjacency diffusing gate
+scores, zero-init so it starts as an exact no-op) and ablated vs standard MoE on
+byte-level WikiText, token routing, 3 seeds, matched config (topology even has
++2.6% params from `adj_proj`):
+
+| router | val BPB (mean ± std, 3 seeds) |
+|---|---|
+| standard MoE (plain) | 3.371 ± 0.006 |
+| + NLA Router (topology) | 3.366 ± 0.010 |
+
+The 0.15% mean difference is **smaller than the seed-to-seed noise**, and on one
+seed topology is *worse* — despite having *more* parameters (a matched-param
+comparison would only make it look worse). Verdict: **expert-topology routing
+provides no measurable benefit over a standard MoE gate at this scale.** The
+plan's 创新点1, as an expert-router, is not supported. (The *sequence-mixer* NLA,
+a different mechanism, remains validated for retrieval — E11.)
 
 **Consequence.** The plan's headline "创新点1" is a brand-new idea that shares only
 a name with the thing we have evidence for. It needs its own ablation from zero
